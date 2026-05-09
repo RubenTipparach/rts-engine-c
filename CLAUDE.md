@@ -133,6 +133,17 @@ involves "generate a model / texture / animation".
   Metal on macOS, D3D11 on Windows). Web is fixed to WebGL2 via
   emscripten.
 
+## Open questions → AskUserQuestion / plan mode
+
+If a response would otherwise end with open questions or pending
+decisions back to the user, surface them through the
+`AskUserQuestion` tool (or `ExitPlanMode` if you're presenting a
+plan to approve) instead of trailing prose questions. Clickable
+choices are faster to answer than retyping prose, and grouping the
+questions keeps the conversation tight. Only fall back to inline
+prose questions when the answer space is genuinely free-form (a name,
+a path, a numeric tolerance) rather than a pick from a small set.
+
 ## Post-commit links
 
 After each commit, always show these links to the user:

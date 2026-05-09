@@ -28,7 +28,9 @@ SRC_C := \
 	src/main.c \
 	src/core/config.c \
 	src/core/log.c \
-	src/render/solarsystem.c
+	src/render/camera.c \
+	src/render/solarsystem.c \
+	src/render/sphere.c
 
 # Sokol implementation TU — platform-specific flags applied separately.
 SRC_SOKOL := src/sokol_impl.c

@@ -1,7 +1,8 @@
 /* main.c — sokol_app entry point for rts-engine-c.
  *
  * Wires the platform shell (window/canvas, input, frame loop) to the
- * solar-system renderer. Backend selection is at compile time:
+ * solar-system renderer + the orbit camera. Backend selection is at
+ * compile time:
  *
  *   - native Linux:   SOKOL_GLCORE
  *   - native macOS:   SOKOL_METAL
@@ -10,7 +11,7 @@
  *
  * sokol_app + sokol_gfx + sokol_glue are single-header libs vendored
  * under third_party/sokol/ and pinned in third_party/sokol/SOKOL_COMMIT.
- * The matching impls compile here and only here. */
+ * The matching impls compile in src/sokol_impl.c. */
 
 #include "sokol_app.h"
 #include "sokol_gfx.h"
@@ -20,12 +21,15 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "render/camera.h"
 #include "render/solarsystem.h"
 
 static struct {
     uint64_t              last_ticks;
     solarsystem_config_t  cfg;
     bool                  cfg_loaded;
+    camera_t              camera;
+    bool                  dragging;
 } app;
 
 static void on_init(void)
@@ -44,7 +48,8 @@ static void on_init(void)
     app.cfg_loaded = config_load_solarsystem("assets/config/solarsystem.yaml", &app.cfg);
     if (app.cfg_loaded) config_log_solarsystem(&app.cfg);
 
-    solarsystem_init();
+    camera_init_solarsystem(&app.camera);
+    solarsystem_init(&app.cfg);
     LOG_INFO("rts-engine-c started — backend=%d", (int)sg_query_backend());
 }
 
@@ -61,15 +66,43 @@ static void on_frame(void)
         .action    = solarsystem_pass_action(),
         .swapchain = sglue_swapchain(),
     });
-    solarsystem_frame(dt, w, h);
+    solarsystem_frame(dt, w, h, &app.camera);
     sg_end_pass();
     sg_commit();
 }
 
 static void on_event(const sapp_event *ev)
 {
-    /* Input plumbing lands with the camera (orbit/zoom) commit. */
-    (void)ev;
+    switch (ev->type) {
+        case SAPP_EVENTTYPE_MOUSE_DOWN:
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+                app.dragging = true;
+                sapp_lock_mouse(true);
+            }
+            break;
+        case SAPP_EVENTTYPE_MOUSE_UP:
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+                app.dragging = false;
+                sapp_lock_mouse(false);
+            }
+            break;
+        case SAPP_EVENTTYPE_MOUSE_MOVE:
+            if (app.dragging) {
+                /* sapp delivers raw deltas while the mouse is locked,
+                 * which is what camera_orbit expects (pixel deltas). */
+                camera_orbit(&app.camera, ev->mouse_dx, ev->mouse_dy);
+            }
+            break;
+        case SAPP_EVENTTYPE_MOUSE_SCROLL:
+            /* sapp scroll_y is wheel ticks (positive = scroll up). The
+             * upstream zoom formula expects "delta" to be a +/- value
+             * scaled by the configured zoom_sens; multiplying by ~100
+             * matches the feel of a typical scroll wheel. */
+            camera_zoom(&app.camera, ev->scroll_y * 100.0f);
+            break;
+        default:
+            break;
+    }
 }
 
 static void on_cleanup(void)

@@ -120,7 +120,7 @@ static void body_apply_default(body_config_t *b)
 {
     memset(b, 0, sizeof(*b));
     b->display_radius = 1.0f;
-    b->color = (HMM_Vec3){{ 1.0f, 1.0f, 1.0f }};
+    b->color = (HMM_Vec3){ .Elements = { 1.0f, 1.0f, 1.0f } };
 }
 
 static void body_set_field(body_config_t *b, const char *key, const char *val_str,
@@ -134,7 +134,7 @@ static void body_set_field(body_config_t *b, const char *key, const char *val_st
     else if (key_eq(key, "orbitSpeed")       && n >= 1) b->orbit_speed     = fl[0];
     else if (key_eq(key, "phase")            && n >= 1) b->phase           = fl[0];
     else if (key_eq(key, "displayRadius")    && n >= 1) b->display_radius  = fl[0];
-    else if (key_eq(key, "color")            && n >= 3) b->color = (HMM_Vec3){{ fl[0], fl[1], fl[2] }};
+    else if (key_eq(key, "color")            && n >= 3) b->color = (HMM_Vec3){ .Elements = { fl[0], fl[1], fl[2] } };
     else if (key_eq(key, "noiseSeed")        && n >= 1) b->noise_seed      = (int)fl[0];
     else if (key_eq(key, "noiseFrequency")   && n >= 1) b->noise_frequency = fl[0];
     else if (key_eq(key, "noiseThresholds")) {
@@ -151,9 +151,9 @@ static void sun_set_field(sun_config_t *s, const char *key, const char *val_str,
 {
     if (key_eq(key, "name")) {
         snprintf(s->name, sizeof(s->name), "%s", val_str);
-    } else if (key_eq(key, "color")        && n >= 3) s->color      = (HMM_Vec3){{ fl[0], fl[1], fl[2] }};
+    } else if (key_eq(key, "color")        && n >= 3) s->color      = (HMM_Vec3){ .Elements = { fl[0], fl[1], fl[2] } };
     else if (key_eq(key, "radius")         && n >= 1) s->radius       = fl[0];
-    else if (key_eq(key, "glowColor")      && n >= 3) s->glow_color = (HMM_Vec3){{ fl[0], fl[1], fl[2] }};
+    else if (key_eq(key, "glowColor")      && n >= 3) s->glow_color = (HMM_Vec3){ .Elements = { fl[0], fl[1], fl[2] } };
     else if (key_eq(key, "glowRadius")     && n >= 1) s->glow_radius  = fl[0];
     else if (key_eq(key, "coronaSpeed")    && n >= 1) s->corona_speed = fl[0];
 }

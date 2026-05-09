@@ -139,6 +139,16 @@ typedef struct {
     bool            has_water;
     HMM_Vec3        water_color;        /* water.fogColor */
     float           water_fog_density;
+
+    /* Atmosphere section (optional). innerRadiusMul / outerRadiusMul
+     * are upstream's Nishita scatter knobs; my pixel-art atmosphere
+     * shader uses outerRadiusMul as the shell radius and a simple
+     * tint colour in lieu of full scattering. */
+    bool            has_atmosphere;
+    float           atmosphere_inner_mul;
+    float           atmosphere_outer_mul;
+    float           atmosphere_sun_intensity;
+    HMM_Vec3        atmosphere_sun_dir;
 } planet_full_config_t;
 
 bool config_load_planet(const char *path, planet_full_config_t *out);

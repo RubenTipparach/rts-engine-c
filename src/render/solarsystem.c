@@ -6,6 +6,7 @@
 #include "gen/sun.glsl.h"
 #include "gen/solarsystem.glsl.h"
 #include "gen/orbit.glsl.h"
+#include "gen/atmosphere.glsl.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -60,6 +61,13 @@ typedef struct {
      * but below land cells. */
     sg_buffer   water_vbuf;
     bool        has_water;
+    /* Optional atmosphere shell (outer sphere at planet_radius *
+     * outerRadiusMul). Drawn after water; alpha-blended pixel-art
+     * rim glow. */
+    sg_buffer   atmo_vbuf;
+    bool        has_atmosphere;
+    HMM_Vec4    atmo_tint;       /* rgb = colour, a = max alpha */
+    float       atmo_outer_mul;  /* 1.0 means shell == terrain */
     HMM_Vec3    base_color;          /* for log + future use */
     float       radius;              /* world-space draw radius */
     float       orbit_radius;
@@ -94,6 +102,15 @@ static struct {
     int          orbit_segments;     /* line-strip vertex count = N+1 */
     sg_shader    orbit_shd;
     sg_pipeline  orbit_pip;
+
+    /* Atmosphere shell — uses the same shared simple-sphere ibuf as
+     * the water shell; per-planet vbufs scale the unit sphere outward
+     * to outerRadiusMul × planet_radius. The pipeline disables depth
+     * write and culls front faces (we view the inside-out shell from
+     * outside the planet) so the rim glow composites cleanly on top
+     * of the terrain mesh. */
+    sg_shader    atmo_shd;
+    sg_pipeline  atmo_pip;
 
     double       sim_time;
 
@@ -145,6 +162,25 @@ static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *l
         s_full_scratch[i].normal     = s_unit_verts[i].normal;
         s_full_scratch[i].color      = color;
         s_full_scratch[i].brightness = brightness;
+    }
+    return sg_make_buffer(&(sg_buffer_desc){
+        .data = { .ptr = s_full_scratch,
+                  .size = (size_t)s_unit_v_count * sizeof(sphere_full_vertex_t) },
+        .label = label,
+    });
+}
+
+/* Atmosphere shell — same simple sphere geometry, scaled outward by
+ * outerRadiusMul. Per-vertex data isn't read by atmosphere.glsl
+ * (only aPos), but we reuse the sphere_full_vertex_t layout so the
+ * shared simple ibuf can index into it. */
+static sg_buffer build_atmosphere_vbuf(float outer_mul, const char *label)
+{
+    for (int i = 0; i < s_unit_v_count; i++) {
+        s_full_scratch[i].pos        = HMM_MulV3F(s_unit_verts[i].pos, outer_mul);
+        s_full_scratch[i].normal     = s_unit_verts[i].normal;
+        s_full_scratch[i].color      = (HMM_Vec3){ .Elements = { 0, 0, 0 } };
+        s_full_scratch[i].brightness = 0.0f;
     }
     return sg_make_buffer(&(sg_buffer_desc){
         .data = { .ptr = s_full_scratch,
@@ -391,6 +427,23 @@ static void build_bodies(void)
                                                  pl->self.name);
                 b->has_water  = true;
             }
+
+            /* Atmosphere shell — any planet with an atmosphere section.
+             * The pixel-art shader only needs an outer radius and a
+             * tint colour; we synthesise the tint from the planet's
+             * water colour (cool blue) when present, or a soft cyan
+             * fallback otherwise. */
+            if (biome_path && full->has_atmosphere && full->atmosphere_outer_mul > 1.0f) {
+                b->atmo_vbuf = build_atmosphere_vbuf(full->atmosphere_outer_mul, pl->self.name);
+                HMM_Vec3 tint_rgb = full->has_water
+                    ? full->water_color
+                    : (HMM_Vec3){ .Elements = { 0.55f, 0.75f, 1.0f } };
+                b->atmo_tint        = (HMM_Vec4){
+                    .Elements = { tint_rgb.X, tint_rgb.Y, tint_rgb.Z, 0.85f }
+                };
+                b->atmo_outer_mul   = full->atmosphere_outer_mul;
+                b->has_atmosphere   = true;
+            }
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
             const body_config_t *m = &pl->moons[j];
@@ -457,6 +510,35 @@ static void build_pipelines(void)
          * primitives from depth-fighting. */
         .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
         .label = "orbit-pipeline",
+    });
+
+    state.atmo_shd = sg_make_shader(atmosphere_atmosphere_shader_desc(backend));
+    state.atmo_pip = sg_make_pipeline(&(sg_pipeline_desc){
+        .shader = state.atmo_shd,
+        .layout = {
+            .buffers[0] = { .stride = sizeof(sphere_full_vertex_t) },
+            .attrs = {
+                [ATTR_atmosphere_atmosphere_aPos] = {
+                    .offset = offsetof(sphere_full_vertex_t, pos),
+                    .format = SG_VERTEXFORMAT_FLOAT3,
+                },
+            },
+        },
+        .index_type   = SG_INDEXTYPE_UINT16,
+        /* Render the inside of the shell sphere from the outside —
+         * front-face culling keeps just the back-facing hemisphere
+         * (the rim glow). */
+        .cull_mode    = SG_CULLMODE_FRONT,
+        .face_winding = SG_FACEWINDING_CCW,
+        .colors[0].blend = {
+            .enabled          = true,
+            .src_factor_rgb   = SG_BLENDFACTOR_SRC_ALPHA,
+            .dst_factor_rgb   = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+            .src_factor_alpha = SG_BLENDFACTOR_ONE,
+            .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+        },
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        .label = "atmosphere-pipeline",
     });
 
     state.ss_shd = sg_make_shader(solarsystem_solarsystem_shader_desc(backend));
@@ -567,7 +649,9 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         sg_draw(0, b->draw_count, 1);
     }
 
-    /* Planets + moons share the solarsystem pipeline. */
+    /* Planets + moons share the solarsystem pipeline.
+     * Capture the camera + view info once so the atmosphere pass
+     * below can reuse it without re-resolving. */
     sg_apply_pipeline(state.ss_pip);
 
     HMM_Vec3 cam_dir_w = HMM_NormV3(HMM_SubV3((HMM_Vec3){ .Elements = { 0, 0, 0 } }, cam_pos));
@@ -612,6 +696,46 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
             sg_apply_uniforms(UB_solarsystem_ss_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
             sg_draw(0, state.index_count, 1);
         }
+    }
+
+    /* Atmosphere pass — alpha-blended shell rendered after every
+     * opaque planet+water but before the orbit rings, so the rim
+     * glow composites against the dark sky and the rings overlay it.
+     * Each planet that loaded an atmosphere section gets its own
+     * shell vbuf scaled to atmo_outer_mul; uniforms come from the
+     * planet's current world position + the camera direction. */
+    sg_apply_pipeline(state.atmo_pip);
+    for (int i = 1; i < state.body_count; i++) {
+        const body_entry_t *b = &state.bodies[i];
+        if (!b->has_atmosphere) continue;
+
+        HMM_Vec3 wp     = world_pos[i];
+        HMM_Mat4 model  = HMM_MulM4(
+            HMM_Translate(wp),
+            HMM_Scale((HMM_Vec3){ .Elements = { b->radius, b->radius, b->radius } }));
+        HMM_Mat4 mvp    = HMM_MulM4(view_proj, model);
+
+        /* Single-direction view approximation — for a thin shell at
+         * solar-system distances, per-fragment view variation is
+         * negligible. Sun direction at body = body_pos (sun at
+         * origin), shader normalises. */
+        HMM_Vec3 view_to_body = HMM_NormV3(HMM_SubV3(wp, cam_pos));
+
+        atmosphere_atmo_vs_params_t avsp;
+        memcpy(avsp.mvp, &mvp, sizeof(mvp));
+        atmosphere_atmo_fs_params_t afsp = {
+            .viewDir = { view_to_body.X, view_to_body.Y, view_to_body.Z, 0.0f },
+            .sunDir  = { wp.X,           wp.Y,           wp.Z,           0.0f },
+            .tint    = { b->atmo_tint.X, b->atmo_tint.Y, b->atmo_tint.Z, b->atmo_tint.W },
+        };
+
+        sg_apply_bindings(&(sg_bindings){
+            .vertex_buffers[0] = b->atmo_vbuf,
+            .index_buffer      = state.ibuf,
+        });
+        sg_apply_uniforms(UB_atmosphere_atmo_vs_params, &(sg_range){ &avsp, sizeof(avsp) });
+        sg_apply_uniforms(UB_atmosphere_atmo_fs_params, &(sg_range){ &afsp, sizeof(afsp) });
+        sg_draw(0, state.index_count, 1);
     }
 
     /* Orbit rings drawn after opaque bodies so transparency composites
@@ -773,15 +897,16 @@ void solarsystem_shutdown(void)
     if (!state.inited) return;
     sg_destroy_pipeline(state.orbit_pip);
     sg_destroy_pipeline(state.ss_pip);
+    sg_destroy_pipeline(state.atmo_pip);
     sg_destroy_pipeline(state.sun_pip);
     sg_destroy_shader(state.orbit_shd);
     sg_destroy_shader(state.ss_shd);
+    sg_destroy_shader(state.atmo_shd);
     sg_destroy_shader(state.sun_shd);
     for (int i = 0; i < state.body_count; i++) {
         sg_destroy_buffer(state.bodies[i].vbuf);
-        if (state.bodies[i].has_water) {
-            sg_destroy_buffer(state.bodies[i].water_vbuf);
-        }
+        if (state.bodies[i].has_water)      sg_destroy_buffer(state.bodies[i].water_vbuf);
+        if (state.bodies[i].has_atmosphere) sg_destroy_buffer(state.bodies[i].atmo_vbuf);
     }
     sg_destroy_buffer(state.orbit_vbuf);
     sg_destroy_buffer(state.ibuf_biome);

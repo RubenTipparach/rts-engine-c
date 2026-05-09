@@ -178,12 +178,25 @@ static int planet_biome_index(HMM_Vec3 unit_pos, const planet_full_config_t *p)
 
 /* Cell-stepped biome bake. Walks the sphere mesh one *quad* at a time
  * (two consecutive triangles share the quad's biome), samples noise
- * at the quad centroid, then emits 6 fresh verts (3 per triangle).
- * Adjacent quads with different biomes don't share verts → crisp
- * colour boundaries instead of vertex-interpolated gradients. */
+ * at the quad centroid, then emits 6 fresh verts (3 per triangle)
+ * each displaced radially inward by the biome's step. Adjacent quads
+ * with different biomes don't share verts, so colour boundaries are
+ * crisp and the height drop creates a visible cliff between cells.
+ *
+ * step_unit = step_height / planet_radius converts the upstream's
+ * world-space step into unit-sphere coordinates so the model matrix
+ * scaling stays linear. Highest biome stays at the unit-sphere
+ * surface; each lower biome drops by `(max_level - biome) * step_unit`. */
 static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const char *label)
 {
-    int v_out = 0;
+    int v_out      = 0;
+    int max_level  = (p->level_count > 0) ? (p->level_count - 1) : 0;
+    /* If radius is zero (shouldn't happen but be defensive) skip the
+     * height step so we still draw a colour-only sphere instead of
+     * collapsing to the origin. */
+    float step_unit = (p->radius > 0.0f && p->step_height > 0.0f)
+        ? (p->step_height / p->radius) : 0.0f;
+
     /* Each quad is 6 consecutive indices in the sphere ibuf
      * (a-c-b, a-d-c — see sphere_make_uv()). */
     for (int q = 0; q + 6 <= s_unit_i_count; q += 6) {
@@ -192,18 +205,16 @@ static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const ch
         uint16_t ib = s_unit_indices[q + 2];
         uint16_t id = s_unit_indices[q + 4];
 
-        HMM_Vec3 pa = s_unit_verts[ia].pos;
-        HMM_Vec3 pb = s_unit_verts[ib].pos;
-        HMM_Vec3 pc = s_unit_verts[ic].pos;
-        HMM_Vec3 pd = s_unit_verts[id].pos;
+        HMM_Vec3 ua = s_unit_verts[ia].pos;
+        HMM_Vec3 ub = s_unit_verts[ib].pos;
+        HMM_Vec3 uc = s_unit_verts[ic].pos;
+        HMM_Vec3 ud = s_unit_verts[id].pos;
 
-        /* Quad centroid on the unit sphere, re-projected so the noise
-         * sample stays at radius 1 regardless of stack/slice density. */
         HMM_Vec3 cen = HMM_NormV3((HMM_Vec3){
             .Elements = {
-                (pa.X + pb.X + pc.X + pd.X) * 0.25f,
-                (pa.Y + pb.Y + pc.Y + pd.Y) * 0.25f,
-                (pa.Z + pb.Z + pc.Z + pd.Z) * 0.25f,
+                (ua.X + ub.X + uc.X + ud.X) * 0.25f,
+                (ua.Y + ub.Y + uc.Y + ud.Y) * 0.25f,
+                (ua.Z + ub.Z + uc.Z + ud.Z) * 0.25f,
             }
         });
         int      biome = planet_biome_index(cen, p);
@@ -211,14 +222,23 @@ static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const ch
             ? p->levels[biome].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
 
-        /* Triangle 1: a-c-b */
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, pa, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, pc, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pb, pb, col, 1.0f };
+        float drop = step_unit * (float)(max_level - biome);
+        float r    = 1.0f - drop;
+        HMM_Vec3 pa = HMM_MulV3F(ua, r);
+        HMM_Vec3 pb = HMM_MulV3F(ub, r);
+        HMM_Vec3 pc = HMM_MulV3F(uc, r);
+        HMM_Vec3 pd = HMM_MulV3F(ud, r);
+
+        /* Triangle 1: a-c-b. Normals stay radial (= the unit-sphere
+         * direction) so lighting on the cell-top reads correctly even
+         * after the inward push. */
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, ua, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, uc, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pb, ub, col, 1.0f };
         /* Triangle 2: a-d-c */
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, pa, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pd, pd, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, pc, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, ua, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pd, ud, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, uc, col, 1.0f };
     }
     return sg_make_buffer(&(sg_buffer_desc){
         .data  = { .ptr = s_biome_scratch,

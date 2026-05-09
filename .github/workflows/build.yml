@@ -19,24 +19,13 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+# Native (linux/macOS) builds are intentionally skipped in CI for now —
+# the only target the user can play right now is the web build, so we
+# fast-path Pages deploys instead of waiting on a native job that
+# nothing currently consumes. The Makefile native target still works
+# locally; re-add a job here when there's a desktop release path.
+
 jobs:
-  native:
-    name: native (linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install GL/X11 dev headers
-        run: sudo apt-get update && sudo apt-get install -y libgl-dev libxi-dev libxcursor-dev
-
-      - name: Build native
-        run: make native
-
-      - name: Smoke check binary
-        run: file build/native/rts-engine
-
   web:
     name: web (emscripten)
     runs-on: ubuntu-latest

@@ -4,6 +4,7 @@
 #include "render/sphere.h"
 #include "gen/sun.glsl.h"
 #include "gen/solarsystem.glsl.h"
+#include "gen/orbit.glsl.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -24,11 +25,14 @@
  *   angle = phase + orbit_speed * sim_time * 0.1
  * (the 0.1 multiplier is the "TimeScale=0.1" comment in the YAML). */
 
-#define ENGINE_TIME_SCALE   0.1f
-#define SPHERE_STACKS       32
-#define SPHERE_SLICES       48
-#define SPHERE_MAX_VERTS    ((SPHERE_STACKS + 1) * (SPHERE_SLICES + 1))
-#define SPHERE_MAX_INDICES  (SPHERE_STACKS * SPHERE_SLICES * 6)
+#define ENGINE_TIME_SCALE       0.1f
+#define SPHERE_STACKS           32
+#define SPHERE_SLICES           48
+#define SPHERE_MAX_VERTS        ((SPHERE_STACKS + 1) * (SPHERE_SLICES + 1))
+#define SPHERE_MAX_INDICES      (SPHERE_STACKS * SPHERE_SLICES * 6)
+/* engine.yaml solarSystemView.orbitRingSegments = 64 (compiled-in
+ * default, overridden once engine.yaml is wired in). */
+#define ORBIT_RING_SEGMENTS     64
 
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
@@ -67,6 +71,10 @@ static struct {
     sg_pipeline  sun_pip;
     sg_shader    ss_shd;
     sg_pipeline  ss_pip;
+
+    sg_buffer    orbit_vbuf;
+    sg_shader    orbit_shd;
+    sg_pipeline  orbit_pip;
 
     double       sim_time;
 } state;
@@ -110,6 +118,18 @@ static void build_geometry(void)
         .label = "sphere-ibuf",
     });
     state.index_count = s_unit_i_count;
+
+    /* Unit-radius circle in the xz plane, line-strip with the first
+     * vertex repeated at the end so we get a closed loop. */
+    static HMM_Vec3 ring_verts[ORBIT_RING_SEGMENTS + 1];
+    for (int i = 0; i <= ORBIT_RING_SEGMENTS; i++) {
+        float ang = (float)i / (float)ORBIT_RING_SEGMENTS * 2.0f * HMM_PI;
+        ring_verts[i] = (HMM_Vec3){ .Elements = { cosf(ang), 0.0f, sinf(ang) } };
+    }
+    state.orbit_vbuf = sg_make_buffer(&(sg_buffer_desc){
+        .data  = { .ptr = ring_verts, .size = sizeof(ring_verts) },
+        .label = "orbit-vbuf",
+    });
 }
 
 static void build_bodies(void)
@@ -179,6 +199,30 @@ static void build_pipelines(void)
         .face_winding = SG_FACEWINDING_CCW,
         .depth        = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = true },
         .label        = "sun-pipeline",
+    });
+
+    state.orbit_shd = sg_make_shader(orbit_orbit_shader_desc(backend));
+    state.orbit_pip = sg_make_pipeline(&(sg_pipeline_desc){
+        .shader = state.orbit_shd,
+        .layout = {
+            .buffers[0] = { .stride = sizeof(HMM_Vec3) },
+            .attrs = {
+                [ATTR_orbit_orbit_aPos] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 },
+            },
+        },
+        .primitive_type = SG_PRIMITIVETYPE_LINE_STRIP,
+        .colors[0].blend = {
+            .enabled          = true,
+            .src_factor_rgb   = SG_BLENDFACTOR_SRC_ALPHA,
+            .dst_factor_rgb   = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+            .src_factor_alpha = SG_BLENDFACTOR_ONE,
+            .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+        },
+        /* Test against existing depth so rings are occluded behind
+         * planets, but don't write — keeps subsequent transparent
+         * primitives from depth-fighting. */
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        .label = "orbit-pipeline",
     });
 
     state.ss_shd = sg_make_shader(solarsystem_solarsystem_shader_desc(backend));
@@ -317,18 +361,52 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         sg_apply_uniforms(UB_solarsystem_ss_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
         sg_draw(0, state.index_count, 1);
     }
+
+    /* Orbit rings drawn after opaque bodies so transparency composites
+     * correctly. Planet rings are centered at the sun (origin); moon
+     * rings are centered at the parent planet's *current* world pos. */
+    sg_apply_pipeline(state.orbit_pip);
+    sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0] = state.orbit_vbuf });
+
+    /* TODO(engine.yaml): expose ring colour / alpha as a tunable. */
+    HMM_Vec4 ring_color = { .Elements = { 0.40f, 0.55f, 0.75f, 0.45f } };
+
+    for (int i = 1; i < state.body_count; i++) {
+        const body_entry_t *b = &state.bodies[i];
+        if (b->orbit_radius <= 0.0f) continue;
+
+        HMM_Vec3 center = (b->parent_index >= 0)
+            ? world_pos[b->parent_index]
+            : (HMM_Vec3){ .Elements = { 0, 0, 0 } };
+        HMM_Mat4 model = HMM_MulM4(
+            HMM_Translate(center),
+            HMM_Scale((HMM_Vec3){ .Elements = { b->orbit_radius, b->orbit_radius, b->orbit_radius } }));
+        HMM_Mat4 mvp   = HMM_MulM4(view_proj, model);
+
+        orbit_orbit_vs_params_t vsp;
+        memcpy(vsp.mvp, &mvp, sizeof(mvp));
+        orbit_orbit_fs_params_t fsp;
+        memcpy(fsp.color, &ring_color, sizeof(ring_color));
+
+        sg_apply_uniforms(UB_orbit_orbit_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
+        sg_apply_uniforms(UB_orbit_orbit_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
+        sg_draw(0, ORBIT_RING_SEGMENTS + 1, 1);
+    }
 }
 
 void solarsystem_shutdown(void)
 {
     if (!state.inited) return;
+    sg_destroy_pipeline(state.orbit_pip);
     sg_destroy_pipeline(state.ss_pip);
     sg_destroy_pipeline(state.sun_pip);
+    sg_destroy_shader(state.orbit_shd);
     sg_destroy_shader(state.ss_shd);
     sg_destroy_shader(state.sun_shd);
     for (int i = 0; i < state.body_count; i++) {
         sg_destroy_buffer(state.bodies[i].vbuf);
     }
+    sg_destroy_buffer(state.orbit_vbuf);
     sg_destroy_buffer(state.ibuf);
     state.inited = false;
 }

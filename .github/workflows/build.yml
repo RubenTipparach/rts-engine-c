@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: ['**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,9 +12,12 @@ permissions:
   pages: write
   id-token: write
 
+# A single Pages deployment is shared across all branches — last push wins.
+# Cancel any in-flight deploy when a newer one starts so the live site
+# always tracks the latest commit instead of queueing behind a slow run.
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   native:
@@ -49,15 +52,18 @@ jobs:
       - name: Build web
         run: make web
 
+      # Pages artifact is only produced on push events. PR builds (which
+      # may come from forks with read-only GITHUB_TOKEN) would fail at
+      # the deploy step, so we just verify the build for those.
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: build-web
 
   deploy:
     name: deploy to GitHub Pages
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     needs: web
     runs-on: ubuntu-latest
     environment:

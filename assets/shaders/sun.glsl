@@ -1,34 +1,49 @@
-// Sun shader (GLSL port of sun.wgsl) — procedural surface, glow, granulation.
+// Sun shader — procedural surface, granulation, limb darkening, flares.
+// Math is the upstream sun.wgsl/sun.glsl port; only the surrounding
+// sokol-shdc annotation is new. Generated header at src/gen/sun.glsl.h
+// via tools/gen-shaders.sh.
 
-layout(std140, binding = 0) uniform U {
-    mat4 mvp;
-    vec4 params; // x = time, y = glow ratio
-} u;
+@module sun
 
+@block log_depth
 const float LOG_DEPTH_FAR = 10000.0;
 vec4 applyLogDepth(vec4 p) {
     float logZ = log2(max(1e-6, 1.0 + p.w)) / log2(1.0 + LOG_DEPTH_FAR);
     return vec4(p.x, p.y, logZ * p.w, p.w);
 }
+@end
 
-#ifdef VERTEX
-layout(location = 0) in vec3 aPos;
+@vs sun_vs
+@include_block log_depth
+
+layout(binding=0) uniform sun_vs_params {
+    mat4 mvp;
+};
+
+layout(location=0) in vec3 aPos;
+
 out vec3 vWorldPos;
 out vec3 vNormal;
 out vec3 vLocalPos;
 
 void main() {
-    gl_Position = applyLogDepth(u.mvp * vec4(aPos, 1.0));
+    gl_Position = applyLogDepth(mvp * vec4(aPos, 1.0));
     vWorldPos = aPos;
     vNormal = normalize(aPos);
     vLocalPos = aPos;
 }
-#endif
+@end
 
-#ifdef FRAGMENT
+@fs sun_fs
+
+layout(binding=1) uniform sun_fs_params {
+    vec4 params;   // x = sim time, y = glow ratio (0..1)
+};
+
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec3 vLocalPos;
+
 out vec4 FragColor;
 
 float hash3(vec3 p) {
@@ -60,7 +75,7 @@ float fbm3(vec3 p) {
 }
 
 void main() {
-    float t = u.params.x;
+    float t = params.x;
     vec3 N = normalize(vNormal);
     vec3 dir = normalize(vLocalPos);
 
@@ -84,4 +99,6 @@ void main() {
     col *= 1.8;
     FragColor = vec4(col, 1.0);
 }
-#endif
+@end
+
+@program sun sun_vs sun_fs

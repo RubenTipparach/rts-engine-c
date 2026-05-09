@@ -2,6 +2,9 @@
 build/
 build-web/
 
+# Downloaded build tools (sokol-shdc, fetched on demand by `make shaders`).
+.tools/
+
 # Editor/IDE
 .vscode/
 .idea/

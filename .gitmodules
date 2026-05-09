@@ -1,0 +1,3 @@
+[submodule "reference/rts-engine"]
+	path = reference/rts-engine
+	url = https://github.com/RubenTipparach/rts-engine.git

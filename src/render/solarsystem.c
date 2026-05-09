@@ -54,6 +54,12 @@ typedef struct {
     sg_buffer   vbuf;
     sg_buffer   ibuf;                /* either ibuf (shared) or ibuf_biome   */
     int         draw_count;          /* index count for this body            */
+    /* Optional water shell (smooth sphere at sea level), only set for
+     * planets with `oceanLevel0: true` in their YAML. Drawn after the
+     * terrain mesh — depth-tested so it sits above sea-floor cells
+     * but below land cells. */
+    sg_buffer   water_vbuf;
+    bool        has_water;
     HMM_Vec3    base_color;          /* for log + future use */
     float       radius;              /* world-space draw radius */
     float       orbit_radius;
@@ -139,6 +145,26 @@ static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *l
         s_full_scratch[i].normal     = s_unit_verts[i].normal;
         s_full_scratch[i].color      = color;
         s_full_scratch[i].brightness = brightness;
+    }
+    return sg_make_buffer(&(sg_buffer_desc){
+        .data = { .ptr = s_full_scratch,
+                  .size = (size_t)s_unit_v_count * sizeof(sphere_full_vertex_t) },
+        .label = label,
+    });
+}
+
+/* Smooth water shell at sea level (top of level-0 cells = level 1's
+ * height). Same shared ibuf as the simple sphere; vbuf positions
+ * scaled inward by sea_level_unit. Single uniform colour from the
+ * planet's `water.fogColor`. */
+static sg_buffer build_water_vbuf(HMM_Vec3 color, float sea_level_unit, const char *label)
+{
+    for (int i = 0; i < s_unit_v_count; i++) {
+        HMM_Vec3 p = HMM_MulV3F(s_unit_verts[i].pos, sea_level_unit);
+        s_full_scratch[i].pos        = p;
+        s_full_scratch[i].normal     = s_unit_verts[i].normal;
+        s_full_scratch[i].color      = color;
+        s_full_scratch[i].brightness = 1.0f;
     }
     return sg_make_buffer(&(sg_buffer_desc){
         .data = { .ptr = s_full_scratch,
@@ -351,6 +377,20 @@ static void build_bodies(void)
                 b->ibuf       = state.ibuf;
                 b->draw_count = state.index_count;
             }
+
+            /* Water shell — only for ocean planets. Sea-level radius
+             * sits at level-1 (the lowest *land* biome): drop one
+             * step from the top biome × (level_count - 2). */
+            if (biome_path && full->ocean_level0 && full->has_water
+                && full->radius > 0.0f && full->step_height > 0.0f
+                && full->level_count >= 2)
+            {
+                float step_unit       = full->step_height / full->radius;
+                float sea_level_unit  = 1.0f - step_unit * (float)(full->level_count - 2);
+                b->water_vbuf = build_water_vbuf(full->water_color, sea_level_unit,
+                                                 pl->self.name);
+                b->has_water  = true;
+            }
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
             const body_config_t *m = &pl->moons[j];
@@ -558,6 +598,20 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         sg_apply_uniforms(UB_solarsystem_ss_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
         sg_apply_uniforms(UB_solarsystem_ss_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
         sg_draw(0, b->draw_count, 1);
+
+        /* Water shell — same shader, same uniforms (lighting from sun
+         * works identically), just a different vbuf at sea level on
+         * the simple shared ibuf. Depth-tested so it sits inside
+         * land cells but covers the sea-floor cells. */
+        if (b->has_water) {
+            sg_apply_bindings(&(sg_bindings){
+                .vertex_buffers[0] = b->water_vbuf,
+                .index_buffer      = state.ibuf,
+            });
+            sg_apply_uniforms(UB_solarsystem_ss_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
+            sg_apply_uniforms(UB_solarsystem_ss_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
+            sg_draw(0, state.index_count, 1);
+        }
     }
 
     /* Orbit rings drawn after opaque bodies so transparency composites
@@ -725,6 +779,9 @@ void solarsystem_shutdown(void)
     sg_destroy_shader(state.sun_shd);
     for (int i = 0; i < state.body_count; i++) {
         sg_destroy_buffer(state.bodies[i].vbuf);
+        if (state.bodies[i].has_water) {
+            sg_destroy_buffer(state.bodies[i].water_vbuf);
+        }
     }
     sg_destroy_buffer(state.orbit_vbuf);
     sg_destroy_buffer(state.ibuf_biome);

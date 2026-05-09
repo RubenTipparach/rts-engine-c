@@ -409,7 +409,8 @@ bool config_load_planet(const char *path, planet_full_config_t *out)
         P_TERRAIN,
         P_TERRAIN_LEVELS,
         P_GENERATION,
-        P_SKIP,            /* water / atmosphere / camera — known but unused */
+        P_WATER,
+        P_SKIP,            /* atmosphere / camera — known but unused */
     } sect = P_TOP;
     int level_idx = -1;
 
@@ -451,8 +452,8 @@ bool config_load_planet(const char *path, planet_full_config_t *out)
         if (indent == 0 && !list_item) {
             if      (key_eq(key, "terrain"))     { sect = P_TERRAIN;    level_idx = -1; continue; }
             else if (key_eq(key, "generation"))  { sect = P_GENERATION;                  continue; }
-            else if (key_eq(key, "water") || key_eq(key, "atmosphere")
-                  || key_eq(key, "camera")) {
+            else if (key_eq(key, "water"))       { sect = P_WATER; out->has_water = true; continue; }
+            else if (key_eq(key, "atmosphere") || key_eq(key, "camera")) {
                 sect = P_SKIP;
                 continue;
             }
@@ -512,6 +513,17 @@ bool config_load_planet(const char *path, planet_full_config_t *out)
                         for (int i = 0; i < take; i++) out->noise_thresholds[i] = floats[i];
                         out->noise_threshold_count = take;
                     }
+                }
+                break;
+
+            case P_WATER:
+                if (indent == 2) {
+                    if      (key_eq(key, "fogColor")   && count >= 3) {
+                        out->water_color = (HMM_Vec3){
+                            .Elements = { floats[0], floats[1], floats[2] }
+                        };
+                    }
+                    else if (key_eq(key, "fogDensity") && count >= 1) out->water_fog_density = floats[0];
                 }
                 break;
 

@@ -134,6 +134,11 @@ typedef struct {
 
     terrain_level_t levels[CFG_MAX_TERRAIN_LEVELS];
     int             level_count;
+
+    /* Water section (optional, only for oceanLevel0 planets). */
+    bool            has_water;
+    HMM_Vec3        water_color;        /* water.fogColor */
+    float           water_fog_density;
 } planet_full_config_t;
 
 bool config_load_planet(const char *path, planet_full_config_t *out);

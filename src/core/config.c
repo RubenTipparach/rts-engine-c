@@ -256,6 +256,150 @@ bool config_load_solarsystem(const char *path, solarsystem_config_t *out)
     return true;
 }
 
+/* ============================================================
+ * engine.yaml — section-keyed, scalar + vec3, same parser primitives.
+ * ============================================================ */
+
+void engine_config_apply_defaults(engine_config_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->camera.transition_duration   = 1.5f;
+    cfg->camera.default_elevation     = 0.4f;
+    cfg->camera.pixels_to_radians     = 0.005f;
+
+    cfg->lighting.sun_direction       = (HMM_Vec3){ .Elements = { 0.5f, 0.7f, 0.5f } };
+    cfg->lighting.ambient_intensity   = 0.15f;
+    cfg->lighting.diffuse_intensity   = 0.85f;
+
+    cfg->solar_system_view.default_distance       = 80.0f;
+    cfg->solar_system_view.min_distance           = 10.0f;
+    cfg->solar_system_view.max_distance           = 200.0f;
+    cfg->solar_system_view.sphere_segments_planet = 40;
+    cfg->solar_system_view.sphere_segments_sun    = 48;
+    cfg->solar_system_view.sphere_segments_moon   = 24;
+    cfg->solar_system_view.orbit_ring_segments    = 64;
+    cfg->solar_system_view.moon_orbit_segments    = 32;
+    cfg->solar_system_view.pick_radius_multiplier = 3.0f;
+}
+
+static void engine_set_camera(camera_engine_t *c, const char *key,
+                              const float *fl, int n)
+{
+    if      (key_eq(key, "transitionDuration") && n >= 1) c->transition_duration = fl[0];
+    else if (key_eq(key, "defaultElevation")   && n >= 1) c->default_elevation   = fl[0];
+    else if (key_eq(key, "pixelsToRadians")    && n >= 1) c->pixels_to_radians   = fl[0];
+}
+
+static void engine_set_lighting(lighting_engine_t *l, const char *key,
+                                const float *fl, int n)
+{
+    if      (key_eq(key, "sunDirection")     && n >= 3) l->sun_direction = (HMM_Vec3){ .Elements = { fl[0], fl[1], fl[2] } };
+    else if (key_eq(key, "ambientIntensity") && n >= 1) l->ambient_intensity = fl[0];
+    else if (key_eq(key, "diffuseIntensity") && n >= 1) l->diffuse_intensity = fl[0];
+}
+
+static void engine_set_solarsystem_view(solarsystem_view_engine_t *v, const char *key,
+                                        const float *fl, int n)
+{
+    if      (key_eq(key, "defaultDistance")      && n >= 1) v->default_distance       = fl[0];
+    else if (key_eq(key, "minDistance")          && n >= 1) v->min_distance           = fl[0];
+    else if (key_eq(key, "maxDistance")          && n >= 1) v->max_distance           = fl[0];
+    else if (key_eq(key, "sphereSegmentsPlanet") && n >= 1) v->sphere_segments_planet = (int)fl[0];
+    else if (key_eq(key, "sphereSegmentsSun")    && n >= 1) v->sphere_segments_sun    = (int)fl[0];
+    else if (key_eq(key, "sphereSegmentsMoon")   && n >= 1) v->sphere_segments_moon   = (int)fl[0];
+    else if (key_eq(key, "orbitRingSegments")    && n >= 1) v->orbit_ring_segments    = (int)fl[0];
+    else if (key_eq(key, "moonOrbitSegments")    && n >= 1) v->moon_orbit_segments    = (int)fl[0];
+    else if (key_eq(key, "pickRadiusMultiplier") && n >= 1) v->pick_radius_multiplier = fl[0];
+}
+
+bool config_load_engine(const char *path, engine_config_t *out)
+{
+    engine_config_apply_defaults(out);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        LOG_ERROR("config: cannot open %s", path);
+        return false;
+    }
+
+    /* Sections we don't yet consume parse to "skip" so unknown keys
+     * inside them are silently ignored — matches the CLAUDE.md rule
+     * that omitted-or-zero fields keep the compiled-in default. */
+    enum {
+        E_NONE,
+        E_CAMERA,
+        E_LIGHTING,
+        E_SOLAR_VIEW,
+        E_SKIP,
+    } sect = E_NONE;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        strip_comment(line);
+        str_rstrip(line);
+
+        const char *probe = line;
+        while (*probe == ' ' || *probe == '\t') probe++;
+        if (*probe == '\0') continue;
+
+        int   indent = count_indent(line);
+        char *p      = line + indent;
+        if (p[0] == '-' && p[1] == ' ') continue;        /* engine.yaml has no list items */
+
+        char *colon = strchr(p, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        char *key = p;
+        char *val = colon + 1;
+        while (*val == ' ' || *val == '\t') val++;
+
+        char *key_end = key + strlen(key);
+        while (key_end > key && (key_end[-1] == ' ' || key_end[-1] == '\t')) *--key_end = '\0';
+
+        if (indent == 0) {
+            if      (key_eq(key, "camera"))          sect = E_CAMERA;
+            else if (key_eq(key, "lighting"))        sect = E_LIGHTING;
+            else if (key_eq(key, "solarSystemView")) sect = E_SOLAR_VIEW;
+            else                                      sect = E_SKIP;
+            continue;
+        }
+
+        char  val_str[256];
+        float floats[16];
+        int   count;
+        parse_value(val, val_str, sizeof(val_str), floats, &count, 16);
+
+        switch (sect) {
+            case E_CAMERA:     engine_set_camera(&out->camera, key, floats, count); break;
+            case E_LIGHTING:   engine_set_lighting(&out->lighting, key, floats, count); break;
+            case E_SOLAR_VIEW: engine_set_solarsystem_view(&out->solar_system_view, key, floats, count); break;
+            default: break;
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
+void config_log_engine(const engine_config_t *cfg)
+{
+    LOG_INFO("config: engine camera=(transitionDur=%.2fs elevation=%.2f sens=%.4f)",
+             cfg->camera.transition_duration, cfg->camera.default_elevation,
+             cfg->camera.pixels_to_radians);
+    LOG_INFO("config: engine view=(dist=%.1f range=[%.1f,%.1f] pickMult=%.2f rings=%d)",
+             cfg->solar_system_view.default_distance,
+             cfg->solar_system_view.min_distance,
+             cfg->solar_system_view.max_distance,
+             cfg->solar_system_view.pick_radius_multiplier,
+             cfg->solar_system_view.orbit_ring_segments);
+    LOG_INFO("config: engine light=(ambient=%.2f diffuse=%.2f sunDir=(%.2f,%.2f,%.2f))",
+             cfg->lighting.ambient_intensity,
+             cfg->lighting.diffuse_intensity,
+             cfg->lighting.sun_direction.X,
+             cfg->lighting.sun_direction.Y,
+             cfg->lighting.sun_direction.Z);
+}
+
 void config_log_solarsystem(const solarsystem_config_t *cfg)
 {
     LOG_INFO("config: sun=%s r=%.2f color=(%.2f,%.2f,%.2f) glow=%.2f coronaSpeed=%.2f",

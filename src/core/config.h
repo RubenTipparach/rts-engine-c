@@ -60,3 +60,48 @@ typedef struct {
 
 bool config_load_solarsystem(const char *path, solarsystem_config_t *out);
 void config_log_solarsystem(const solarsystem_config_t *cfg);
+
+/* Engine-wide knobs from assets/config/engine.yaml. The fields are a
+ * subset of the upstream schema — only the sections M1 actually
+ * consumes (camera, lighting, solarSystemView). Other sections in
+ * the file (lod, planetEditView, rtsCamera, slopes, etc.) are read
+ * by later milestones and currently ignored by the loader.
+ *
+ * Defaults are populated by engine_config_apply_defaults() before
+ * the YAML is parsed; any field whose YAML value is non-zero
+ * overrides the default. This is the "compiled-in default merged
+ * with YAML overrides" convention from CLAUDE.md. */
+
+typedef struct {
+    float transition_duration;   /* seconds for click-zoom slide  */
+    float default_elevation;     /* radians                       */
+    float pixels_to_radians;     /* orbit drag sensitivity        */
+} camera_engine_t;
+
+typedef struct {
+    HMM_Vec3 sun_direction;
+    float    ambient_intensity;
+    float    diffuse_intensity;
+} lighting_engine_t;
+
+typedef struct {
+    float default_distance;
+    float min_distance;
+    float max_distance;
+    int   sphere_segments_planet;
+    int   sphere_segments_sun;
+    int   sphere_segments_moon;
+    int   orbit_ring_segments;
+    int   moon_orbit_segments;
+    float pick_radius_multiplier;
+} solarsystem_view_engine_t;
+
+typedef struct {
+    camera_engine_t           camera;
+    lighting_engine_t         lighting;
+    solarsystem_view_engine_t solar_system_view;
+} engine_config_t;
+
+void engine_config_apply_defaults(engine_config_t *cfg);
+bool config_load_engine(const char *path, engine_config_t *out);
+void config_log_engine(const engine_config_t *cfg);

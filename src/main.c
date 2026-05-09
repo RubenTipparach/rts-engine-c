@@ -35,7 +35,9 @@
 static struct {
     uint64_t              last_ticks;
     solarsystem_config_t  cfg;
+    engine_config_t       eng;
     bool                  cfg_loaded;
+    bool                  eng_loaded;
     camera_t              camera;
 
     bool                  left_pressed;
@@ -66,12 +68,17 @@ static void on_init(void)
     /* Path is the same on native and web — emscripten preloads
      * `assets/` at the VFS root via `--preload-file assets@/assets`,
      * so a relative path resolves against `/` there and against the
-     * project root on native. */
+     * project root on native. engine.yaml is loaded first so its
+     * defaults are baked in even if the file is missing. */
+    app.eng_loaded = config_load_engine("assets/config/engine.yaml", &app.eng);
+    if (!app.eng_loaded) engine_config_apply_defaults(&app.eng);
+    config_log_engine(&app.eng);
+
     app.cfg_loaded = config_load_solarsystem("assets/config/solarsystem.yaml", &app.cfg);
     if (app.cfg_loaded) config_log_solarsystem(&app.cfg);
 
-    camera_init_solarsystem(&app.camera);
-    solarsystem_init(&app.cfg);
+    camera_init_solarsystem(&app.camera, &app.eng);
+    solarsystem_init(&app.cfg, &app.eng);
     LOG_INFO("rts-engine-c started — backend=%d", (int)sg_query_backend());
 }
 

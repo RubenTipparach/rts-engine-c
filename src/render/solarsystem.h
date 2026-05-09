@@ -13,7 +13,8 @@
 #include "render/camera.h"
 #include "sokol_gfx.h"
 
-void           solarsystem_init(const solarsystem_config_t *cfg);
+void           solarsystem_init(const solarsystem_config_t *cfg,
+                                 const engine_config_t       *eng);
 sg_pass_action solarsystem_pass_action(void);
 
 /* Run before solarsystem_frame() — slides the camera's focus_target

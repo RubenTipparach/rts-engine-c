@@ -30,9 +30,10 @@
 #define SPHERE_SLICES           48
 #define SPHERE_MAX_VERTS        ((SPHERE_STACKS + 1) * (SPHERE_SLICES + 1))
 #define SPHERE_MAX_INDICES      (SPHERE_STACKS * SPHERE_SLICES * 6)
-/* engine.yaml solarSystemView.orbitRingSegments = 64 (compiled-in
- * default, overridden once engine.yaml is wired in). */
-#define ORBIT_RING_SEGMENTS     64
+/* Upper bound for the static orbit-ring vbuf. The actual segment
+ * count comes from engine.yaml solarSystemView.orbitRingSegments at
+ * runtime — clamped to [8, ORBIT_RING_MAX_SEGMENTS]. */
+#define ORBIT_RING_MAX_SEGMENTS 128
 
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
@@ -64,6 +65,7 @@ typedef struct {
 static struct {
     bool                       inited;
     const solarsystem_config_t *cfg;
+    const engine_config_t      *eng;
 
     sg_buffer    ibuf;
     int          index_count;
@@ -77,6 +79,7 @@ static struct {
     sg_pipeline  ss_pip;
 
     sg_buffer    orbit_vbuf;
+    int          orbit_segments;     /* line-strip vertex count = N+1 */
     sg_shader    orbit_shd;
     sg_pipeline  orbit_pip;
 
@@ -149,14 +152,20 @@ static void build_geometry(void)
     state.index_count = s_unit_i_count;
 
     /* Unit-radius circle in the xz plane, line-strip with the first
-     * vertex repeated at the end so we get a closed loop. */
-    static HMM_Vec3 ring_verts[ORBIT_RING_SEGMENTS + 1];
-    for (int i = 0; i <= ORBIT_RING_SEGMENTS; i++) {
-        float ang = (float)i / (float)ORBIT_RING_SEGMENTS * 2.0f * HMM_PI;
+     * vertex repeated at the end so we get a closed loop. Segment
+     * count from engine.yaml, clamped to the static buffer cap. */
+    int seg = state.eng->solar_system_view.orbit_ring_segments;
+    if (seg < 8)                       seg = 8;
+    if (seg > ORBIT_RING_MAX_SEGMENTS) seg = ORBIT_RING_MAX_SEGMENTS;
+    state.orbit_segments = seg;
+
+    static HMM_Vec3 ring_verts[ORBIT_RING_MAX_SEGMENTS + 1];
+    for (int i = 0; i <= seg; i++) {
+        float ang = (float)i / (float)seg * 2.0f * HMM_PI;
         ring_verts[i] = (HMM_Vec3){ .Elements = { cosf(ang), 0.0f, sinf(ang) } };
     }
     state.orbit_vbuf = sg_make_buffer(&(sg_buffer_desc){
-        .data  = { .ptr = ring_verts, .size = sizeof(ring_verts) },
+        .data  = { .ptr = ring_verts, .size = (size_t)(seg + 1) * sizeof(HMM_Vec3) },
         .label = "orbit-vbuf",
     });
 }
@@ -288,13 +297,12 @@ static void build_pipelines(void)
     });
 }
 
-void solarsystem_init(const solarsystem_config_t *cfg)
+void solarsystem_init(const solarsystem_config_t *cfg, const engine_config_t *eng)
 {
-    state.cfg      = cfg;
-    state.sim_time = 0.0;
-    /* engine.yaml camera.transitionDuration = 1.5 (compiled-in
-     * default; will read from engine.yaml once that loader lands). */
-    state.transition_dur = 1.5f;
+    state.cfg            = cfg;
+    state.eng            = eng;
+    state.sim_time       = 0.0;
+    state.transition_dur = eng->camera.transition_duration;
     state.active_body    = 0;       /* 0 = sun mode */
     state.transitioning  = false;
     build_geometry();
@@ -432,7 +440,7 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
 
         sg_apply_uniforms(UB_orbit_orbit_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
         sg_apply_uniforms(UB_orbit_orbit_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
-        sg_draw(0, ORBIT_RING_SEGMENTS + 1, 1);
+        sg_draw(0, state.orbit_segments + 1, 1);
     }
 }
 
@@ -452,9 +460,7 @@ void solarsystem_focus_sun(const camera_t *cam)
 {
     if (!state.inited) return;
     if (state.active_body == 0 && !state.transitioning) return;
-    /* engine.yaml solarSystemView.defaultDistance = 80 (compiled-in
-     * default). */
-    start_transition_to(0, 80.0f, cam);
+    start_transition_to(0, state.eng->solar_system_view.default_distance, cam);
 }
 
 bool solarsystem_pick(int sx, int sy, int fb_w, int fb_h, const camera_t *cam)
@@ -479,14 +485,15 @@ bool solarsystem_pick(int sx, int sy, int fb_w, int fb_h, const camera_t *cam)
     HMM_Vec3 world_pos[MAX_BODIES];
     resolve_world_positions(world_pos);
 
-    /* Ray-sphere intersection per body, with a slightly inflated pick
-     * radius (engine.yaml solarSystemView.pickRadiusMultiplier = 3.0). */
-    const float PICK_RADIUS_MULTIPLIER = 3.0f;
+    /* Ray-sphere intersection per body. The pick radius is inflated
+     * by engine.yaml solarSystemView.pickRadiusMultiplier so small
+     * bodies remain tappable at the default zoom level. */
+    const float pick_mult = state.eng->solar_system_view.pick_radius_multiplier;
     int   best_i = -1;
     float best_t = INFINITY;
     for (int i = 0; i < state.body_count; i++) {
         HMM_Vec3 oc = HMM_SubV3(origin, world_pos[i]);
-        float r  = state.bodies[i].radius * PICK_RADIUS_MULTIPLIER;
+        float r  = state.bodies[i].radius * pick_mult;
         float bc = HMM_DotV3(dir, oc);
         float cc = HMM_DotV3(oc, oc) - r * r;
         float disc = bc * bc - cc;

@@ -1,0 +1,64 @@
+# Engine-wide visual and gameplay config. No hardcoded magic numbers.
+
+camera:
+  transitionDuration: 1.5       # seconds for solar system ↔ planet zoom
+  defaultElevation: 0.4         # radians
+  pixelsToRadians: 0.005        # orbit drag sensitivity
+
+lod:
+  outlineMaxDist: 5.0           # hide cell outline beyond this
+  atmosphereMaxDist: 20.0       # skip atmosphere ray-march beyond this
+  planetMaxDist: 50.0           # skip full planet render beyond this (use solar system sphere)
+  transitionBlendStart: 0.1     # smooth value where textured planet starts rendering
+  transitionBlendEnd: 0.8       # smooth value where planet fades on zoom-out
+
+lighting:
+  sunDirection: [0.5, 0.7, 0.5] # default for planet edit (overridden by solar system pos)
+  ambientIntensity: 0.15
+  diffuseIntensity: 0.85
+
+solarSystemView:
+  defaultDistance: 80.0
+  minDistance: 10.0
+  maxDistance: 200.0
+  sphereSegmentsPlanet: 40
+  sphereSegmentsSun: 48
+  sphereSegmentsMoon: 24
+  orbitRingSegments: 64
+  moonOrbitSegments: 32
+  pickRadiusMultiplier: 3.0     # pick threshold = screenRadius × this
+
+planetEditView:
+  defaultDistance: 6.0
+  minDistance: 4.0
+  maxDistance: 200.0          # camera distance clamp (radius units)
+  autoZoomOutThreshold: 100.0 # distance above which we glide back to solar system
+
+# Ground-level RTS camera. As the player zooms toward the surface the look-at
+# target slides from the planet center to a point ahead on the ground, producing
+# a tilted, traditional-RTS view.
+rtsCamera:
+  groundClearance: 0.15        # camera floor altitude above surface (radius units)
+  maxTiltDegrees: 59.0         # tilt angle from straight-down at full RTS view (=> ~31° below horizon)
+  tiltStartZoomPercent: 0.70   # zoom % (log-altitude) at which the RTS tilt starts engaging
+  tiltFullZoomPercent: 1.00    # zoom % at which the RTS tilt is fully engaged
+  scrollIncrement: 0.002       # altitude change per scroll-delta unit, as a fraction of current altitude
+  zoomLerpRate: 12.0           # per-second exponential rate that displayed zoom chases the target
+
+slopes:
+  density: 0.45            # fraction of eligible border cells that become slopes
+  seedOffset: 1337         # combined with planet seed for deterministic slope placement
+
+unitArrival:
+  slotSpacingMultiplier: 1.5   # min chord between sub-slot anchors = unit halfwidth × this; per-cell capacity is per unit type in rts.yaml
+
+unitMovement:
+  altitudeLerpRate: 20.0       # per-second rate the unit chases the current cell's surface height
+  slopesTraversable: true      # units route via slope cells to change elevation (combined with canHop=false on every unit, this forces "go around to find a slope" instead of jumping cliffs)
+
+terrain:
+  chamferInset: 0.10       # fraction polygon vertex pulls toward cell center for top fan inner ring
+  chamferDrop:  0.005      # how far polygon vertex drops below level height (= bevel height, 0.3 × stepHeight)
+
+debug:
+  showUnitPaths: true     # draw each unit's remaining A* path as a line strip on the surface

@@ -20,14 +20,17 @@
 UNAME_S := $(shell uname -s)
 
 CC      ?= cc
-CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
+CFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
 INCS    := -Ithird_party -Ithird_party/sokol -Isrc
 
 # Plain C sources (compiled the same on every platform).
 SRC_C := \
 	src/main.c \
+	src/core/config.c \
 	src/core/log.c \
-	src/render/solarsystem.c
+	src/render/camera.c \
+	src/render/solarsystem.c \
+	src/render/sphere.c
 
 # Sokol implementation TU — platform-specific flags applied separately.
 SRC_SOKOL := src/sokol_impl.c
@@ -44,7 +47,7 @@ ifeq ($(UNAME_S),Linux)
 	BACKEND       := SOKOL_GLCORE
 	LDLIBS        := -lX11 -lXi -lXcursor -lGL -ldl -lpthread -lm
 	# clock_gettime / CLOCK_MONOTONIC live behind a POSIX feature gate
-	# under -std=c11; expose them for sokol_time.h and sokol_app.h.
+	# under -std=gnu11; expose them for sokol_time.h and sokol_app.h.
 	CFLAGS        += -D_POSIX_C_SOURCE=199309L
 	SOKOL_CFLAGS  :=
 endif
@@ -60,12 +63,32 @@ endif
 NATIVE_DEFS := -D$(BACKEND)
 
 EMCC      ?= emcc
-EMCFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
+EMCFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
 WEB_DEFS  := -DSOKOL_GLES3
 WEB_LINK  := -sUSE_WEBGL2=1 -sFULL_ES3=1 -sALLOW_MEMORY_GROWTH=1 \
              --preload-file assets@/assets --shell-file tools/shell.html
 
-.PHONY: all native web run serve clean
+# sokol-shdc is fetched on demand by `make shaders`. The generated
+# headers under src/gen/*.glsl.h are committed so a clean clone builds
+# without needing the binary locally — only re-run `make shaders` after
+# editing assets/shaders/*.glsl.
+SHDC_VERSION ?= master
+SHDC_DIR     := .tools
+SHDC         := $(SHDC_DIR)/sokol-shdc
+SHDC_OS      := linux
+ifeq ($(UNAME_S),Darwin)
+ifeq ($(shell uname -m),arm64)
+	SHDC_OS := osx_arm64
+else
+	SHDC_OS := osx
+endif
+endif
+SHDC_TARGETS := glsl410:glsl300es
+
+GEN_DIR    := src/gen
+GEN_HDRS   := $(GEN_DIR)/sun.glsl.h $(GEN_DIR)/solarsystem.glsl.h $(GEN_DIR)/orbit.glsl.h
+
+.PHONY: all native web run serve clean shaders
 
 all: native
 
@@ -101,3 +124,21 @@ serve: web
 
 clean:
 	rm -rf build build-web
+
+# Regenerate the sokol-shdc headers from assets/shaders/*.glsl. The
+# binary is downloaded on first use into .tools/ (gitignored). The
+# default `make` does NOT depend on this; run it after editing a
+# shader and commit the resulting headers under src/gen/.
+shaders: $(GEN_HDRS)
+
+$(SHDC):
+	@mkdir -p $(SHDC_DIR)
+	@echo "fetching sokol-shdc ($(SHDC_OS), $(SHDC_VERSION))…"
+	@curl -sL --fail "https://github.com/floooh/sokol-tools-bin/archive/refs/heads/$(SHDC_VERSION).tar.gz" \
+		| tar -xz -C $(SHDC_DIR) --strip-components=3 \
+		"sokol-tools-bin-$(SHDC_VERSION)/bin/$(SHDC_OS)/sokol-shdc"
+	@chmod +x $(SHDC)
+
+$(GEN_DIR)/%.glsl.h: assets/shaders/%.glsl | $(SHDC)
+	@mkdir -p $(GEN_DIR)
+	$(SHDC) -i $< -o $@ -l $(SHDC_TARGETS)

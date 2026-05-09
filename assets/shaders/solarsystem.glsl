@@ -1,37 +1,49 @@
-// Solar system shader — Lambert-lit spheres (GLSL port of solarsystem.wgsl).
-// Per-vertex: pos(3f) + normal(3f) + color(3f) + brightness(1f), stride 40.
+// Solar-system (planets + moons) — Lambert + rim, with Bayer dithering
+// for LOD fade. Per-vertex baked colour and brightness. Mirrored from
+// the upstream solarsystem.wgsl/glsl. Sokol-shdc annotated; generated
+// header at src/gen/solarsystem.glsl.h.
 
-layout(std140, binding = 0) uniform U {
-    mat4 mvp;
-    vec4 sunDir;
-    vec4 viewDir; // xyz: cam dir, w: dither
-} u;
+@module solarsystem
 
+@block log_depth
 const float LOG_DEPTH_FAR = 10000.0;
 vec4 applyLogDepth(vec4 p) {
     float logZ = log2(max(1e-6, 1.0 + p.w)) / log2(1.0 + LOG_DEPTH_FAR);
     return vec4(p.x, p.y, logZ * p.w, p.w);
 }
+@end
 
-#ifdef VERTEX
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec3 aColor;
-layout(location = 3) in float aBrightness;
+@vs ss_vs
+@include_block log_depth
+
+layout(binding=0) uniform ss_vs_params {
+    mat4 mvp;
+};
+
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec3 aColor;
+layout(location=3) in float aBrightness;
 
 out vec3 vNormal;
 out vec3 vColor;
 out float vBrightness;
 
 void main() {
-    gl_Position = applyLogDepth(u.mvp * vec4(aPos, 1.0));
+    gl_Position = applyLogDepth(mvp * vec4(aPos, 1.0));
     vNormal = aNormal;
     vColor = aColor;
     vBrightness = aBrightness;
 }
-#endif
+@end
 
-#ifdef FRAGMENT
+@fs ss_fs
+
+layout(binding=1) uniform ss_fs_params {
+    vec4 sunDir;       // xyz = world-space sun light direction at this body, w unused
+    vec4 viewDir;      // xyz = world-space camera dir, w = dither (0 = solid)
+};
+
 in vec3 vNormal;
 in vec3 vColor;
 in float vBrightness;
@@ -48,15 +60,15 @@ float bayer4(uvec2 p) {
 }
 
 void main() {
-    float dither = u.viewDir.w;
+    float dither = viewDir.w;
     if (dither > 0.001) {
         uvec2 p = uvec2(uint(gl_FragCoord.x), uint(gl_FragCoord.y));
         if (dither > bayer4(p)) discard;
     }
 
     vec3 N = normalize(vNormal);
-    vec3 L = normalize(u.sunDir.xyz);
-    vec3 V = normalize(u.viewDir.xyz);
+    vec3 L = normalize(sunDir.xyz);
+    vec3 V = normalize(viewDir.xyz);
     float NdotL = max(dot(N, L), 0.0);
     vec3 lit = vColor * vBrightness * (0.25 + NdotL * 0.9);
 
@@ -66,4 +78,6 @@ void main() {
 
     FragColor = vec4(lit, 1.0);
 }
-#endif
+@end
+
+@program solarsystem ss_vs ss_fs

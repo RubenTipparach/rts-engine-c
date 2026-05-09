@@ -106,12 +106,12 @@ void engine_config_apply_defaults(engine_config_t *cfg);
 bool config_load_engine(const char *path, engine_config_t *out);
 void config_log_engine(const engine_config_t *cfg);
 
-/* Per-planet config (assets/planets/*.yaml — referenced by `configFile`
- * in solarsystem.yaml). Surface and biome data the M2 mesh + biome
- * shader will consume; orbital / display fields stay denormalized in
- * solarsystem.yaml's planet entry. The parser ignores sections it
- * doesn't yet read (water, atmosphere, camera) so a copy-pasted
- * upstream YAML works as-is. */
+/* Per-planet config — the YAMLs under `assets/planets/`, referenced
+ * by `configFile:` in solarsystem.yaml. Surface and biome data the
+ * M2 mesh + biome shader consume; orbital / display fields stay
+ * denormalized in solarsystem.yaml's planet entry. The parser ignores
+ * sections it doesn't yet read (water, atmosphere, camera) so a
+ * copy-pasted upstream YAML works as-is. */
 
 #define CFG_MAX_TERRAIN_LEVELS  8
 

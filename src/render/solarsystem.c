@@ -52,6 +52,8 @@ typedef struct {
     body_kind_t kind;
     char        name[CFG_NAME_LEN];
     sg_buffer   vbuf;
+    sg_buffer   ibuf;                /* either ibuf (shared) or ibuf_biome   */
+    int         draw_count;          /* index count for this body            */
     HMM_Vec3    base_color;          /* for log + future use */
     float       radius;              /* world-space draw radius */
     float       orbit_radius;
@@ -71,6 +73,7 @@ static struct {
     int                               planet_full_count;
 
     sg_buffer    ibuf;
+    sg_buffer    ibuf_biome;       /* sequential 0..N-1 for cell-stepped planets */
     int          index_count;
 
     body_entry_t bodies[MAX_BODIES];
@@ -122,6 +125,13 @@ static int                   s_unit_v_count;
 static int                   s_unit_i_count;
 static sphere_full_vertex_t  s_full_scratch[SPHERE_MAX_VERTS];
 
+/* Cell-stepped biome path — duplicates the per-quad verts so adjacent
+ * cells with different biomes get crisp colour boundaries. Sized for
+ * one vertex per index in the original sphere mesh, since that's the
+ * upper bound when no edges are shared. */
+static sphere_full_vertex_t  s_biome_scratch[SPHERE_MAX_INDICES];
+static uint16_t              s_biome_indices[SPHERE_MAX_INDICES];
+
 static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *label)
 {
     for (int i = 0; i < s_unit_v_count; i++) {
@@ -166,23 +176,53 @@ static int planet_biome_index(HMM_Vec3 unit_pos, const planet_full_config_t *p)
     return biome;
 }
 
+/* Cell-stepped biome bake. Walks the sphere mesh one *quad* at a time
+ * (two consecutive triangles share the quad's biome), samples noise
+ * at the quad centroid, then emits 6 fresh verts (3 per triangle).
+ * Adjacent quads with different biomes don't share verts → crisp
+ * colour boundaries instead of vertex-interpolated gradients. */
 static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const char *label)
 {
-    for (int i = 0; i < s_unit_v_count; i++) {
-        HMM_Vec3 pos = s_unit_verts[i].pos;
-        int biome    = planet_biome_index(pos, p);
-        HMM_Vec3 col = (biome < p->level_count)
+    int v_out = 0;
+    /* Each quad is 6 consecutive indices in the sphere ibuf
+     * (a-c-b, a-d-c — see sphere_make_uv()). */
+    for (int q = 0; q + 6 <= s_unit_i_count; q += 6) {
+        uint16_t ia = s_unit_indices[q + 0];
+        uint16_t ic = s_unit_indices[q + 1];
+        uint16_t ib = s_unit_indices[q + 2];
+        uint16_t id = s_unit_indices[q + 4];
+
+        HMM_Vec3 pa = s_unit_verts[ia].pos;
+        HMM_Vec3 pb = s_unit_verts[ib].pos;
+        HMM_Vec3 pc = s_unit_verts[ic].pos;
+        HMM_Vec3 pd = s_unit_verts[id].pos;
+
+        /* Quad centroid on the unit sphere, re-projected so the noise
+         * sample stays at radius 1 regardless of stack/slice density. */
+        HMM_Vec3 cen = HMM_NormV3((HMM_Vec3){
+            .Elements = {
+                (pa.X + pb.X + pc.X + pd.X) * 0.25f,
+                (pa.Y + pb.Y + pc.Y + pd.Y) * 0.25f,
+                (pa.Z + pb.Z + pc.Z + pd.Z) * 0.25f,
+            }
+        });
+        int      biome = planet_biome_index(cen, p);
+        HMM_Vec3 col   = (p->level_count > 0 && biome < p->level_count)
             ? p->levels[biome].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
 
-        s_full_scratch[i].pos        = pos;
-        s_full_scratch[i].normal     = s_unit_verts[i].normal;
-        s_full_scratch[i].color      = col;
-        s_full_scratch[i].brightness = 1.0f;
+        /* Triangle 1: a-c-b */
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, pa, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, pc, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pb, pb, col, 1.0f };
+        /* Triangle 2: a-d-c */
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, pa, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pd, pd, col, 1.0f };
+        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, pc, col, 1.0f };
     }
     return sg_make_buffer(&(sg_buffer_desc){
-        .data  = { .ptr = s_full_scratch,
-                   .size = (size_t)s_unit_v_count * sizeof(sphere_full_vertex_t) },
+        .data  = { .ptr = s_biome_scratch,
+                   .size = (size_t)v_out * sizeof(sphere_full_vertex_t) },
         .label = label,
     });
 }
@@ -203,6 +243,19 @@ static void build_geometry(void)
         .label = "sphere-ibuf",
     });
     state.index_count = s_unit_i_count;
+
+    /* Sequential ibuf for the cell-stepped biome path. Indexes into
+     * each planet's per-quad-duplicated vbuf, where each triangle's
+     * three verts are stored contiguously. */
+    for (int i = 0; i < s_unit_i_count; i++) {
+        s_biome_indices[i] = (uint16_t)i;
+    }
+    state.ibuf_biome = sg_make_buffer(&(sg_buffer_desc){
+        .usage = { .index_buffer = true },
+        .data  = { .ptr = s_biome_indices,
+                   .size = (size_t)s_unit_i_count * sizeof(uint16_t) },
+        .label = "sphere-biome-ibuf",
+    });
 
     /* Unit-radius circle in the xz plane, line-strip with the first
      * vertex repeated at the end so we get a closed loop. Segment
@@ -241,7 +294,9 @@ static void build_bodies(void)
         b->parent_index = -1;
         b->zoom_min     = 0.0f;
         b->zoom_max     = 0.0f;
-        b->vbuf = build_body_vbuf(state.cfg->sun.color, 1.0f, "sun-vbuf");
+        b->vbuf       = build_body_vbuf(state.cfg->sun.color, 1.0f, "sun-vbuf");
+        b->ibuf       = state.ibuf;
+        b->draw_count = state.index_count;
     }
 
     for (int i = 0; i < state.cfg->planet_count && state.body_count < MAX_BODIES; i++) {
@@ -263,12 +318,19 @@ static void build_bodies(void)
             b->zoom_min     = pl->self.zoom_min;
             b->zoom_max     = pl->self.zoom_max;
             /* If the per-planet YAML loaded successfully, use its
-             * biome levels for per-vertex colour; otherwise fall back
-             * to the flat colour from solarsystem.yaml. */
-            b->vbuf = (full && full->level_count > 0
-                            && full->noise_threshold_count > 0)
-                ? build_planet_biome_vbuf(full, pl->self.name)
-                : build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
+             * biome levels for cell-stepped per-quad colour; otherwise
+             * fall back to the flat colour from solarsystem.yaml. */
+            bool biome_path = (full && full->level_count > 0
+                                    && full->noise_threshold_count > 0);
+            if (biome_path) {
+                b->vbuf       = build_planet_biome_vbuf(full, pl->self.name);
+                b->ibuf       = state.ibuf_biome;
+                b->draw_count = state.index_count;
+            } else {
+                b->vbuf       = build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
+                b->ibuf       = state.ibuf;
+                b->draw_count = state.index_count;
+            }
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
             const body_config_t *m = &pl->moons[j];
@@ -283,7 +345,9 @@ static void build_bodies(void)
             b->parent_index = planet_body_idx;
             b->zoom_min     = m->zoom_min;
             b->zoom_max     = m->zoom_max;
-            b->vbuf = build_body_vbuf(m->color, 1.0f, m->name);
+            b->vbuf         = build_body_vbuf(m->color, 1.0f, m->name);
+            b->ibuf         = state.ibuf;
+            b->draw_count   = state.index_count;
         }
     }
 }
@@ -436,11 +500,11 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         sg_apply_pipeline(state.sun_pip);
         sg_apply_bindings(&(sg_bindings){
             .vertex_buffers[0] = b->vbuf,
-            .index_buffer      = state.ibuf,
+            .index_buffer      = b->ibuf,
         });
         sg_apply_uniforms(UB_sun_sun_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
         sg_apply_uniforms(UB_sun_sun_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
-        sg_draw(0, state.index_count, 1);
+        sg_draw(0, b->draw_count, 1);
     }
 
     /* Planets + moons share the solarsystem pipeline. */
@@ -469,11 +533,11 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
 
         sg_apply_bindings(&(sg_bindings){
             .vertex_buffers[0] = b->vbuf,
-            .index_buffer      = state.ibuf,
+            .index_buffer      = b->ibuf,
         });
         sg_apply_uniforms(UB_solarsystem_ss_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
         sg_apply_uniforms(UB_solarsystem_ss_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
-        sg_draw(0, state.index_count, 1);
+        sg_draw(0, b->draw_count, 1);
     }
 
     /* Orbit rings drawn after opaque bodies so transparency composites
@@ -643,6 +707,7 @@ void solarsystem_shutdown(void)
         sg_destroy_buffer(state.bodies[i].vbuf);
     }
     sg_destroy_buffer(state.orbit_vbuf);
+    sg_destroy_buffer(state.ibuf_biome);
     sg_destroy_buffer(state.ibuf);
     state.inited = false;
 }

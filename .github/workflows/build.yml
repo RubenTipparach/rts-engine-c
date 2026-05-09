@@ -1,0 +1,63 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A single Pages deployment is shared across all branches — last push wins.
+# Cancel any in-flight deploy when a newer one starts so the live site
+# always tracks the latest commit instead of queueing behind a slow run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+# Native (linux/macOS) builds are intentionally skipped in CI for now —
+# the only target the user can play right now is the web build, so we
+# fast-path Pages deploys instead of waiting on a native job that
+# nothing currently consumes. The Makefile native target still works
+# locally; re-add a job here when there's a desktop release path.
+
+jobs:
+  web:
+    name: web (emscripten)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+
+      - name: Build web
+        run: make web
+
+      # Pages artifact is only produced on push events. PR builds (which
+      # may come from forks with read-only GITHUB_TOKEN) would fail at
+      # the deploy step, so we just verify the build for those.
+      - name: Upload Pages artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build-web
+
+  deploy:
+    name: deploy to GitHub Pages
+    if: github.event_name == 'push'
+    needs: web
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

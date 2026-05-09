@@ -1,0 +1,81 @@
+# Solar system layout — all orbital bodies and sun properties.
+
+sun:
+  name: Sol
+  color: [1.0, 0.95, 0.8]
+  radius: 6.0
+  glowColor: [1.0, 0.7, 0.3]
+  glowRadius: 10.0
+  coronaSpeed: 0.1
+
+planets:
+  - name: Venus
+    configFile: planets/venus.yaml
+    orbitRadius: 30.0
+    orbitSpeed: 0.30          # rad/sec, scaled by TimeScale=0.1 in GetPosition
+    phase: 0.8
+    displayRadius: 1.90
+    color: [0.85, 0.70, 0.35]
+    noiseSeed: 999
+    noiseFrequency: 2.2
+    # 6 levels: lowland, volcanic, tessera, plateau, shield, maxwell
+    noiseThresholds: [0.15, 0.30, 0.50, 0.68, 0.85]
+    zoomMin: 1.5
+    zoomMax: 6.0
+
+  - name: Earth
+    configFile: planets/earth.yaml
+    orbitRadius: 50.0
+    orbitSpeed: 0.20
+    phase: 0.0
+    displayRadius: 2.0
+    color: [0.3, 0.6, 0.9]
+    noiseSeed: 42
+    noiseFrequency: 2.5
+    # 6 levels: water, sand, grass, grass_dry, rock, snow.
+    # t0=0.45 keeps about half the surface ocean.
+    noiseThresholds: [0.45, 0.52, 0.65, 0.78, 0.88]
+    zoomMin: 2.0
+    zoomMax: 8.0
+    moons:
+      - name: Moon
+        configFile: planets/moon.yaml
+        orbitRadius: 6.0
+        orbitSpeed: 1.20      # moon orbits Earth ~6× faster than Earth's year
+        phase: 0.0
+        displayRadius: 1.08
+        color: [0.7, 0.7, 0.7]
+        noiseSeed: 77
+        noiseFrequency: 3.0
+        # 6 levels: crater_floor, regolith, highland, ridge, mountain, peak
+        noiseThresholds: [0.20, 0.35, 0.55, 0.72, 0.88]
+        zoomMin: 1.2
+        zoomMax: 4.0
+
+  - name: Mars
+    configFile: planets/mars.yaml
+    orbitRadius: 76.0
+    orbitSpeed: 0.15
+    phase: 2.1
+    displayRadius: 1.06
+    color: [0.85, 0.4, 0.2]
+    noiseSeed: 1337
+    noiseFrequency: 2.8
+    # 6 levels: canyon, dust, plains, mesa, basalt, ice_cap
+    noiseThresholds: [0.20, 0.35, 0.50, 0.68, 0.85]
+    zoomMin: 1.5
+    zoomMax: 5.0
+
+  - name: Glacius
+    configFile: planets/ice.yaml
+    orbitRadius: 110.0
+    orbitSpeed: 0.08
+    phase: 4.2
+    displayRadius: 1.44
+    color: [0.7, 0.85, 0.95]
+    noiseSeed: 5555
+    noiseFrequency: 2.0
+    # 6 levels: frozen_ocean, ice_shelf, tundra, snowfield, frozen_rock, glacier
+    noiseThresholds: [0.40, 0.50, 0.60, 0.74, 0.88]
+    zoomMin: 1.5
+    zoomMax: 6.0

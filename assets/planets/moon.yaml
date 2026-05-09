@@ -1,0 +1,43 @@
+name: Moon
+radius: 1.08
+subdivisions: 3
+stepHeight: 0.02
+
+terrain:
+  atlasUrl: textures/moon/terrain_atlas.png
+  # 6 levels: crater_floor, regolith, highland, ridge, mountain, peak.
+  # No real water — the basin level is just dark crater regolith.
+  oceanLevel0: false
+  levels:
+    - name: crater_floor
+      color: [0.18, 0.18, 0.18]
+    - name: regolith
+      color: [0.36, 0.35, 0.34]
+    - name: highland
+      color: [0.52, 0.52, 0.52]
+    - name: ridge
+      color: [0.45, 0.43, 0.40]
+    - name: mountain
+      color: [0.62, 0.62, 0.62]
+    - name: peak
+      color: [0.78, 0.78, 0.78]
+
+water:
+  dudvUrl: textures/water_dudv.png
+  normalUrl: textures/water_normal.png
+
+generation:
+  seed: 77
+  frequency: 3.0
+  thresholds: [0.20, 0.35, 0.55, 0.72, 0.88]
+
+atmosphere:
+  innerRadiusMul: 0.95
+  outerRadiusMul: 1.02    # barely any atmosphere
+  sunIntensity: 2.0
+  sunDirection: [0.5, 0.7, 0.5]
+
+camera:
+  zoomMin: 1.2
+  zoomMax: 4.0
+  defaultDistance: 2.0

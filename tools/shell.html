@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>rts-engine-c</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ccc;
+               font-family: ui-monospace, monospace; overflow: hidden; }
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; cursor: default; }
+  #status { position: fixed; left: 8px; bottom: 8px; font-size: 11px; opacity: 0.5; }
+</style>
+</head>
+<body>
+<canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
+<div id="status">loading…</div>
+<script>
+  var statusEl = document.getElementById('status');
+  var Module = {
+    canvas: (function() {
+      var c = document.getElementById('canvas');
+      c.addEventListener('webglcontextlost', function(e){ alert('WebGL context lost.'); e.preventDefault(); }, false);
+      return c;
+    })(),
+    print:    function(t){ console.log(t); },
+    printErr: function(t){ console.error(t); },
+    setStatus: function(t){ if (statusEl) statusEl.textContent = t || ''; },
+    totalDependencies: 0,
+    monitorRunDependencies: function(left) {
+      this.totalDependencies = Math.max(this.totalDependencies, left);
+      Module.setStatus(left ? 'preparing… (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')' : 'running');
+    }
+  };
+  Module.setStatus('downloading…');
+  window.onerror = function(){ Module.setStatus('error — see console'); };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

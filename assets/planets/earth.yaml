@@ -1,0 +1,64 @@
+# Earth-like planet
+# To create a new planet: copy this file, tweak any fields, reference it in the host.
+name: Earth
+radius: 2.0
+subdivisions: 5    # 10 * 4^n + 2 cells:  1→42, 2→162, 3→642, 4→2562, 5→10242
+stepHeight: 0.04
+
+terrain:
+  atlasUrl: textures/terrain_atlas.png
+  # 6 levels: 1 water + 1 sand + 2 grass + 1 rock + 1 snow.
+  # Index = cliff level in the mesh; color is the fallback shown if the
+  # atlas fails to load.
+  oceanLevel0: true
+  levels:
+    - name: water
+      color: [0.15, 0.35, 0.75]
+    - name: sand
+      color: [0.90, 0.80, 0.55]
+    - name: grass
+      color: [0.30, 0.65, 0.25]
+    - name: grass_dry
+      color: [0.55, 0.65, 0.30]
+    - name: rock
+      color: [0.55, 0.55, 0.55]
+    - name: snow
+      color: [0.95, 0.97, 1.00]
+
+water:
+  dudvUrl:  textures/water_dudv.png
+  normalUrl: textures/water_normal.png
+  # Catlike Coding "Looking Through Water" tuning knobs.
+  # fogColor    = colour the water absorbs to at depth.
+  # fogDensity  = per-world-unit absorption rate. Earth's stepHeight is
+  #               0.04 and the water column is ~0.03 wu, so a density
+  #               around 8 fades the seabed out over a few cells.
+  # refractionStrength = max screen-UV offset from wave-normal-driven
+  #               refraction. 0.04 reads as plausible chop-on-the-surface
+  #               distortion without smearing the cliffs underneath.
+  fogColor: [0.04, 0.18, 0.30]
+  fogDensity: 8.0
+  refractionStrength: 0.04
+
+generation:
+  seed: 42
+  frequency: 2.5
+  # Five thresholds separating the six levels (noise ∈ [0,1]):
+  #   n < t0 → water       (ocean — t0 high so most of Earth is sea)
+  #   n < t1 → sand        (beach band, narrow)
+  #   n < t2 → grass       (lowland meadow)
+  #   n < t3 → grass_dry   (savanna highlands)
+  #   n < t4 → rock
+  #   else   → snow
+  thresholds: [0.45, 0.52, 0.65, 0.78, 0.88]
+
+atmosphere:
+  innerRadiusMul: 0.92
+  outerRadiusMul: 1.5
+  sunIntensity: 30.0
+  sunDirection: [0.5, 0.7, 0.5]
+
+camera:
+  zoomMin: 2.0
+  zoomMax: 8.0
+  defaultDistance: 3.0

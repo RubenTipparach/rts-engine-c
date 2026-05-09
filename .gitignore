@@ -1,0 +1,16 @@
+# Build outputs
+build/
+build-web/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# macOS / Windows cruft
+.DS_Store
+Thumbs.db
+
+# Local Claude config (per-user, not committed)
+.claude/settings.local.json

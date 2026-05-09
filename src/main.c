@@ -24,12 +24,23 @@
 #include "render/camera.h"
 #include "render/solarsystem.h"
 
+#include <math.h>
+
+/* Pixels of cumulative pointer travel that flips a press from "click"
+ * (releases as a pick) to "drag" (releases without picking, keeps the
+ * camera-orbit it started). 5 px is the Win32 default. */
+#define DRAG_VS_CLICK_THRESHOLD_PX 5.0f
+
 static struct {
     uint64_t              last_ticks;
     solarsystem_config_t  cfg;
     bool                  cfg_loaded;
     camera_t              camera;
+
+    bool                  left_pressed;
     bool                  dragging;
+    float                 press_x, press_y;
+    float                 drag_total;
 } app;
 
 static void on_init(void)
@@ -59,6 +70,10 @@ static void on_frame(void)
     const double dt = stm_sec(stm_diff(now, app.last_ticks));
     app.last_ticks = now;
 
+    /* Pre-frame hooks: advance click-zoom transition + lock focus on
+     * the active body so an orbiting planet stays centered. */
+    solarsystem_pre_frame(dt, &app.camera);
+
     const int w = sapp_width();
     const int h = sapp_height();
 
@@ -76,30 +91,61 @@ static void on_event(const sapp_event *ev)
     switch (ev->type) {
         case SAPP_EVENTTYPE_MOUSE_DOWN:
             if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
-                app.dragging = true;
-                sapp_lock_mouse(true);
+                app.left_pressed = true;
+                app.press_x      = ev->mouse_x;
+                app.press_y      = ev->mouse_y;
+                app.drag_total   = 0.0f;
+                /* Don't start orbit yet — wait until the cursor has
+                 * actually moved past the click threshold. That lets
+                 * a tap-with-zero-motion be picked up as a click. */
             }
             break;
+
         case SAPP_EVENTTYPE_MOUSE_UP:
-            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
-                app.dragging = false;
-                sapp_lock_mouse(false);
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && app.left_pressed) {
+                if (!app.dragging && app.drag_total <= DRAG_VS_CLICK_THRESHOLD_PX) {
+                    /* Click → pick. ev->mouse_x/y are valid here
+                     * because the mouse was never locked. */
+                    solarsystem_pick((int)app.press_x, (int)app.press_y,
+                                     sapp_width(), sapp_height(), &app.camera);
+                }
+                if (app.dragging) {
+                    app.dragging = false;
+                    sapp_lock_mouse(false);
+                }
+                app.left_pressed = false;
             }
             break;
+
         case SAPP_EVENTTYPE_MOUSE_MOVE:
-            if (app.dragging) {
-                /* sapp delivers raw deltas while the mouse is locked,
-                 * which is what camera_orbit expects (pixel deltas). */
-                camera_orbit(&app.camera, ev->mouse_dx, ev->mouse_dy);
+            if (app.left_pressed) {
+                app.drag_total += fabsf(ev->mouse_dx) + fabsf(ev->mouse_dy);
+                if (!app.dragging && app.drag_total > DRAG_VS_CLICK_THRESHOLD_PX) {
+                    app.dragging = true;
+                    sapp_lock_mouse(true);
+                }
+                if (app.dragging) {
+                    /* sapp delivers raw deltas while the pointer is
+                     * locked, which is the pixel-delta unit camera_orbit
+                     * expects. */
+                    camera_orbit(&app.camera, ev->mouse_dx, ev->mouse_dy);
+                }
             }
             break;
+
         case SAPP_EVENTTYPE_MOUSE_SCROLL:
-            /* sapp scroll_y is wheel ticks (positive = scroll up). The
-             * upstream zoom formula expects "delta" to be a +/- value
-             * scaled by the configured zoom_sens; multiplying by ~100
-             * matches the feel of a typical scroll wheel. */
+            /* sapp scroll_y is wheel ticks (positive = scroll up).
+             * The upstream zoom formula expects "delta" in ~pixels;
+             * 100 turns one notch into a perceptible step. */
             camera_zoom(&app.camera, ev->scroll_y * 100.0f);
             break;
+
+        case SAPP_EVENTTYPE_KEY_DOWN:
+            if (ev->key_code == SAPP_KEYCODE_ESCAPE) {
+                solarsystem_focus_sun(&app.camera);
+            }
+            break;
+
         default:
             break;
     }

@@ -55,6 +55,9 @@ typedef struct {
     float       orbit_speed;
     float       phase;
     int         parent_index;        /* -1 for sun/planets, planet index for moons */
+    /* Click-zoom range, in radius units, copied from solarsystem.yaml. */
+    float       zoom_min;
+    float       zoom_max;
 } body_entry_t;
 
 static struct {
@@ -77,7 +80,32 @@ static struct {
     sg_pipeline  orbit_pip;
 
     double       sim_time;
+
+    /* Click-to-zoom state. active_body == 0 means "sun mode" (focus
+     * at origin); otherwise it's an index into bodies[]. The
+     * transition lerps focus + distance from `from_*` to the body's
+     * current world position over `transition_dur` seconds, then
+     * keeps `focus_target` glued to the body each frame. */
+    int          active_body;
+    bool         transitioning;
+    float        transition_t;
+    float        transition_dur;
+    HMM_Vec3     from_focus;
+    float        from_distance;
+    float        to_distance;
 } state;
+
+static HMM_Vec3 body_world_pos(const body_entry_t *b, double t);
+
+static void resolve_world_positions(HMM_Vec3 *out)
+{
+    for (int i = 0; i < state.body_count; i++) {
+        HMM_Vec3 local = body_world_pos(&state.bodies[i], state.sim_time);
+        out[i] = (state.bodies[i].parent_index >= 0)
+            ? HMM_AddV3(out[state.bodies[i].parent_index], local)
+            : local;
+    }
+}
 
 /* ---- mesh + per-body vbuf ---- */
 
@@ -146,6 +174,8 @@ static void build_bodies(void)
         b->orbit_speed  = 0.0f;
         b->phase        = 0.0f;
         b->parent_index = -1;
+        b->zoom_min     = 0.0f;
+        b->zoom_max     = 0.0f;
         b->vbuf = build_body_vbuf(state.cfg->sun.color, 1.0f, "sun-vbuf");
     }
 
@@ -161,6 +191,8 @@ static void build_bodies(void)
             b->orbit_speed  = pl->self.orbit_speed;
             b->phase        = pl->self.phase;
             b->parent_index = -1;
+            b->zoom_min     = pl->self.zoom_min;
+            b->zoom_max     = pl->self.zoom_max;
             b->vbuf = build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
@@ -173,6 +205,8 @@ static void build_bodies(void)
             b->orbit_speed  = m->orbit_speed;
             b->phase        = m->phase;
             b->parent_index = planet_body_idx;
+            b->zoom_min     = m->zoom_min;
+            b->zoom_max     = m->zoom_max;
             b->vbuf = build_body_vbuf(m->color, 1.0f, m->name);
         }
     }
@@ -253,6 +287,11 @@ void solarsystem_init(const solarsystem_config_t *cfg)
 {
     state.cfg      = cfg;
     state.sim_time = 0.0;
+    /* engine.yaml camera.transitionDuration = 1.5 (compiled-in
+     * default; will read from engine.yaml once that loader lands). */
+    state.transition_dur = 1.5f;
+    state.active_body    = 0;       /* 0 = sun mode */
+    state.transitioning  = false;
     build_geometry();
     build_bodies();
     build_pipelines();
@@ -299,12 +338,7 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
 
     /* Resolve world positions once so moons can read their parents. */
     HMM_Vec3 world_pos[MAX_BODIES];
-    for (int i = 0; i < state.body_count; i++) {
-        HMM_Vec3 local = body_world_pos(&state.bodies[i], state.sim_time);
-        world_pos[i] = (state.bodies[i].parent_index >= 0)
-            ? HMM_AddV3(world_pos[state.bodies[i].parent_index], local)
-            : local;
-    }
+    resolve_world_positions(world_pos);
 
     /* Sun first. */
     {
@@ -391,6 +425,113 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         sg_apply_uniforms(UB_orbit_orbit_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
         sg_apply_uniforms(UB_orbit_orbit_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
         sg_draw(0, ORBIT_RING_SEGMENTS + 1, 1);
+    }
+}
+
+/* ---- click-to-zoom ---- */
+
+static void start_transition_to(int body_idx, float to_distance, const camera_t *cam)
+{
+    state.active_body    = body_idx;
+    state.transitioning  = true;
+    state.transition_t   = 0.0f;
+    state.from_focus     = cam->focus_target;
+    state.from_distance  = cam->distance;
+    state.to_distance    = to_distance;
+}
+
+void solarsystem_focus_sun(const camera_t *cam)
+{
+    if (!state.inited) return;
+    if (state.active_body == 0 && !state.transitioning) return;
+    /* engine.yaml solarSystemView.defaultDistance = 80 (compiled-in
+     * default). */
+    start_transition_to(0, 80.0f, cam);
+}
+
+bool solarsystem_pick(int sx, int sy, int fb_w, int fb_h, const camera_t *cam)
+{
+    if (!state.inited || fb_w <= 0 || fb_h <= 0) return false;
+
+    /* Screen → NDC → world ray. */
+    float ndc_x = 2.0f * (float)sx / (float)fb_w - 1.0f;
+    float ndc_y = 1.0f - 2.0f * (float)sy / (float)fb_h;
+    float aspect = (float)fb_w / (float)fb_h;
+    HMM_Mat4 inv_vp = HMM_InvGeneralM4(HMM_MulM4(camera_proj(cam, aspect),
+                                                  camera_view(cam)));
+    HMM_Vec4 near_clip = { .Elements = { ndc_x, ndc_y, -1.0f, 1.0f } };
+    HMM_Vec4 far_clip  = { .Elements = { ndc_x, ndc_y,  1.0f, 1.0f } };
+    HMM_Vec4 nw = HMM_MulM4V4(inv_vp, near_clip);
+    HMM_Vec4 fw = HMM_MulM4V4(inv_vp, far_clip);
+    HMM_Vec3 near_pos = HMM_DivV3F((HMM_Vec3){ .Elements = { nw.X, nw.Y, nw.Z } }, nw.W);
+    HMM_Vec3 far_pos  = HMM_DivV3F((HMM_Vec3){ .Elements = { fw.X, fw.Y, fw.Z } }, fw.W);
+    HMM_Vec3 origin   = camera_eye(cam);
+    HMM_Vec3 dir      = HMM_NormV3(HMM_SubV3(far_pos, near_pos));
+
+    HMM_Vec3 world_pos[MAX_BODIES];
+    resolve_world_positions(world_pos);
+
+    /* Ray-sphere intersection per body, with a slightly inflated pick
+     * radius (engine.yaml solarSystemView.pickRadiusMultiplier = 3.0). */
+    const float PICK_RADIUS_MULTIPLIER = 3.0f;
+    int   best_i = -1;
+    float best_t = INFINITY;
+    for (int i = 0; i < state.body_count; i++) {
+        HMM_Vec3 oc = HMM_SubV3(origin, world_pos[i]);
+        float r  = state.bodies[i].radius * PICK_RADIUS_MULTIPLIER;
+        float bc = HMM_DotV3(dir, oc);
+        float cc = HMM_DotV3(oc, oc) - r * r;
+        float disc = bc * bc - cc;
+        if (disc < 0.0f) continue;
+        float t = -bc - sqrtf(disc);
+        if (t > 0.0f && t < best_t) {
+            best_t = t;
+            best_i = i;
+        }
+    }
+
+    if (best_i < 0) return false;
+
+    if (best_i == 0) {
+        solarsystem_focus_sun(cam);
+    } else {
+        const body_entry_t *b = &state.bodies[best_i];
+        /* Zoom-in distance: midpoint of the body's zoomMin/zoomMax
+         * range from solarsystem.yaml (in radius units). Falls back
+         * to 5x radius if the body didn't carry zoom limits. */
+        float to_distance = b->radius * 5.0f;
+        if (b->zoom_max > b->zoom_min && b->zoom_min > 0.0f) {
+            to_distance = b->radius * 0.5f * (b->zoom_min + b->zoom_max);
+        }
+        start_transition_to(best_i, to_distance, cam);
+    }
+    return true;
+}
+
+void solarsystem_pre_frame(double dt, camera_t *cam)
+{
+    if (!state.inited) return;
+
+    HMM_Vec3 world_pos[MAX_BODIES];
+    resolve_world_positions(world_pos);
+
+    HMM_Vec3 target_focus = world_pos[state.active_body];
+
+    if (state.transitioning) {
+        state.transition_t += (float)(dt / state.transition_dur);
+        if (state.transition_t >= 1.0f) {
+            state.transition_t   = 1.0f;
+            state.transitioning  = false;
+        }
+        float t = state.transition_t;
+        float s = t * t * (3.0f - 2.0f * t);   /* smoothstep */
+        cam->focus_target = HMM_LerpV3(state.from_focus, s, target_focus);
+        cam->distance     = state.from_distance + (state.to_distance - state.from_distance) * s;
+        if (cam->distance < cam->dist_min) cam->distance = cam->dist_min;
+        if (cam->distance > cam->dist_max) cam->distance = cam->dist_max;
+    } else if (state.active_body != 0) {
+        /* Lock-on follow — planet is still orbiting. */
+        cam->focus_target = target_focus;
     }
 }
 

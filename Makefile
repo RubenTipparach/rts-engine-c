@@ -20,12 +20,13 @@
 UNAME_S := $(shell uname -s)
 
 CC      ?= cc
-CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
+CFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
 INCS    := -Ithird_party -Ithird_party/sokol -Isrc
 
 # Plain C sources (compiled the same on every platform).
 SRC_C := \
 	src/main.c \
+	src/core/config.c \
 	src/core/log.c \
 	src/render/solarsystem.c
 
@@ -44,7 +45,7 @@ ifeq ($(UNAME_S),Linux)
 	BACKEND       := SOKOL_GLCORE
 	LDLIBS        := -lX11 -lXi -lXcursor -lGL -ldl -lpthread -lm
 	# clock_gettime / CLOCK_MONOTONIC live behind a POSIX feature gate
-	# under -std=c11; expose them for sokol_time.h and sokol_app.h.
+	# under -std=gnu11; expose them for sokol_time.h and sokol_app.h.
 	CFLAGS        += -D_POSIX_C_SOURCE=199309L
 	SOKOL_CFLAGS  :=
 endif
@@ -60,7 +61,7 @@ endif
 NATIVE_DEFS := -D$(BACKEND)
 
 EMCC      ?= emcc
-EMCFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
+EMCFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
 WEB_DEFS  := -DSOKOL_GLES3
 WEB_LINK  := -sUSE_WEBGL2=1 -sFULL_ES3=1 -sALLOW_MEMORY_GROWTH=1 \
              --preload-file assets@/assets --shell-file tools/shell.html

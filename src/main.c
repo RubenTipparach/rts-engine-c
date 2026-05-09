@@ -18,11 +18,14 @@
 #include "sokol_log.h"
 #include "sokol_time.h"
 
+#include "core/config.h"
 #include "core/log.h"
 #include "render/solarsystem.h"
 
 static struct {
-    uint64_t last_ticks;
+    uint64_t              last_ticks;
+    solarsystem_config_t  cfg;
+    bool                  cfg_loaded;
 } app;
 
 static void on_init(void)
@@ -33,6 +36,13 @@ static void on_init(void)
     });
     stm_setup();
     app.last_ticks = stm_now();
+
+    /* Path is the same on native and web — emscripten preloads
+     * `assets/` at the VFS root via `--preload-file assets@/assets`,
+     * so a relative path resolves against `/` there and against the
+     * project root on native. */
+    app.cfg_loaded = config_load_solarsystem("assets/config/solarsystem.yaml", &app.cfg);
+    if (app.cfg_loaded) config_log_solarsystem(&app.cfg);
 
     solarsystem_init();
     LOG_INFO("rts-engine-c started — backend=%d", (int)sg_query_backend());

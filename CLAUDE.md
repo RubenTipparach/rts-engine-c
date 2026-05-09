@@ -85,6 +85,31 @@ The only exception is values that are part of an algorithm's
 semantic meaning, it just makes the hash work. Those stay inline,
 because exposing them would invite breakage rather than tuning.
 
+## Visual aesthetic — pixel art
+
+The intended look of this project is **pixel art**: chunky, low-res,
+deliberately limited palettes, visible stair-stepping over smooth
+gradients. Every visual choice should lean into that — palette-driven
+flat colours, hard edges between regions, dithered transitions
+instead of antialiased ones, no soft fades or large gradient washes
+that read as "modern realistic."
+
+Design implications:
+
+- Texture *resolution* is bounded — see the texture rule below.
+- Procedural meshes and shaders should prefer stepped output over
+  smooth: discrete biome cells are right, vertex-interpolated
+  gradient blends across cells are wrong. Bayer dithering is fine
+  (it's the pixel-art way to fade an edge).
+- When picking colours, use the per-planet YAML palettes literally —
+  don't add post-process exposure / saturation passes that wash them
+  toward "filmic." If a planet's biome list says
+  `[0.30, 0.65, 0.25]`, that's the green you want on screen.
+- New shaders that exist purely for "looks better" with no pixel-art
+  affordance (heavy bloom, screen-space AO, motion blur) should be
+  avoided unless they have a pixel-friendly form (e.g. a quantised
+  bloom that snaps to N steps).
+
 ## Static game asset guidelines
 
 These rules apply to every asset Claude generates, hand-edits, or asks
@@ -92,10 +117,14 @@ the user to drop into the repo. Keep them in mind whenever a task
 involves "generate a model / texture / animation".
 
 - **Textures** — if the task involves generating textures, the result
-  must be baked to PNG (8-bit RGBA, ≤32×32 unless the existing pipeline
-  allows otherwise) and committed under `assets/textures/`. Build-time
-  conversions (e.g., to `.sprite` or compressed formats) are derived
-  artifacts — do not commit them, only the source PNG.
+  must be baked to PNG (8-bit RGBA, **≤64×64**) and committed under
+  `assets/textures/`. Anything bigger reads as "modern texture art"
+  and breaks the pixel-art aesthetic. Most use cases (terrain
+  patches, UI sprites, particle masks) are well-served by 16×16 or
+  32×32; reserve 64×64 for cases that genuinely need the resolution
+  (e.g. a font atlas or a hero sprite). Build-time conversions
+  (e.g., to `.sprite` or compressed formats) are derived artifacts —
+  do not commit them, only the source PNG.
 - **3D models** — this is a procedural game, so the default for new 3D
   content is to generate it procedurally in code (mesh built at runtime
   from parameters, the way planets / orbit rings / starfields already

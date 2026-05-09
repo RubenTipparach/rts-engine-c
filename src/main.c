@@ -98,7 +98,7 @@ static void on_init(void)
     }
 
     camera_init_solarsystem(&app.camera, &app.eng);
-    solarsystem_init(&app.cfg, &app.eng);
+    solarsystem_init(&app.cfg, &app.eng, app.planet_full, app.planet_full_count);
     LOG_INFO("rts-engine-c started — backend=%d", (int)sg_query_backend());
 }
 

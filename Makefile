@@ -28,6 +28,7 @@ SRC_C := \
 	src/main.c \
 	src/core/config.c \
 	src/core/log.c \
+	src/core/noise.c \
 	src/render/camera.c \
 	src/render/solarsystem.c \
 	src/render/sphere.c

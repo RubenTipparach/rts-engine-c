@@ -1,6 +1,7 @@
 #include "solarsystem.h"
 
 #include "core/log.h"
+#include "core/noise.h"
 #include "render/sphere.h"
 #include "gen/sun.glsl.h"
 #include "gen/solarsystem.glsl.h"
@@ -63,9 +64,11 @@ typedef struct {
 } body_entry_t;
 
 static struct {
-    bool                       inited;
-    const solarsystem_config_t *cfg;
-    const engine_config_t      *eng;
+    bool                              inited;
+    const solarsystem_config_t       *cfg;
+    const engine_config_t            *eng;
+    const planet_full_config_t       *planet_full;
+    int                               planet_full_count;
 
     sg_buffer    ibuf;
     int          index_count;
@@ -134,6 +137,56 @@ static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *l
     });
 }
 
+/* Pick a biome index for a unit-sphere position by sampling fbm noise
+ * and walking the threshold table. Mirrors the per-cell logic the
+ * upstream's GenerateMesh.cs does for its icosahedron cells, just on
+ * UV-sphere vertices instead. The C-side fbm in src/core/noise.c is
+ * algorithmically identical to the GLSL one in sun.glsl. */
+static int planet_biome_index(HMM_Vec3 unit_pos, const planet_full_config_t *p)
+{
+    /* Seed offsets the noise lattice so each planet samples a
+     * different region without requiring a different hash function. */
+    float seed_off = (float)p->noise_seed * 0.13f;
+    HMM_Vec3 q = {
+        .Elements = {
+            unit_pos.X * p->noise_frequency + seed_off,
+            unit_pos.Y * p->noise_frequency + seed_off * 1.7f,
+            unit_pos.Z * p->noise_frequency + seed_off * 2.3f,
+        }
+    };
+    float n = noise_fbm3(q, 4);
+
+    int biome = 0;
+    for (int i = 0; i < p->noise_threshold_count; i++) {
+        if (n >= p->noise_thresholds[i]) biome = i + 1;
+    }
+    if (biome >= p->level_count && p->level_count > 0) {
+        biome = p->level_count - 1;
+    }
+    return biome;
+}
+
+static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const char *label)
+{
+    for (int i = 0; i < s_unit_v_count; i++) {
+        HMM_Vec3 pos = s_unit_verts[i].pos;
+        int biome    = planet_biome_index(pos, p);
+        HMM_Vec3 col = (biome < p->level_count)
+            ? p->levels[biome].color
+            : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
+
+        s_full_scratch[i].pos        = pos;
+        s_full_scratch[i].normal     = s_unit_verts[i].normal;
+        s_full_scratch[i].color      = col;
+        s_full_scratch[i].brightness = 1.0f;
+    }
+    return sg_make_buffer(&(sg_buffer_desc){
+        .data  = { .ptr = s_full_scratch,
+                   .size = (size_t)s_unit_v_count * sizeof(sphere_full_vertex_t) },
+        .label = label,
+    });
+}
+
 static void build_geometry(void)
 {
     if (!sphere_make_uv(SPHERE_STACKS, SPHERE_SLICES,
@@ -192,7 +245,10 @@ static void build_bodies(void)
     }
 
     for (int i = 0; i < state.cfg->planet_count && state.body_count < MAX_BODIES; i++) {
-        const planet_config_t *pl = &state.cfg->planets[i];
+        const planet_config_t      *pl   = &state.cfg->planets[i];
+        const planet_full_config_t *full = (i < state.planet_full_count)
+            ? &state.planet_full[i] : NULL;
+
         int planet_body_idx = state.body_count;
         {
             body_entry_t *b = &state.bodies[state.body_count++];
@@ -206,7 +262,13 @@ static void build_bodies(void)
             b->parent_index = -1;
             b->zoom_min     = pl->self.zoom_min;
             b->zoom_max     = pl->self.zoom_max;
-            b->vbuf = build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
+            /* If the per-planet YAML loaded successfully, use its
+             * biome levels for per-vertex colour; otherwise fall back
+             * to the flat colour from solarsystem.yaml. */
+            b->vbuf = (full && full->level_count > 0
+                            && full->noise_threshold_count > 0)
+                ? build_planet_biome_vbuf(full, pl->self.name)
+                : build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
             const body_config_t *m = &pl->moons[j];
@@ -297,10 +359,15 @@ static void build_pipelines(void)
     });
 }
 
-void solarsystem_init(const solarsystem_config_t *cfg, const engine_config_t *eng)
+void solarsystem_init(const solarsystem_config_t  *cfg,
+                      const engine_config_t       *eng,
+                      const planet_full_config_t  *planet_full,
+                      int                          planet_full_count)
 {
-    state.cfg            = cfg;
-    state.eng            = eng;
+    state.cfg                = cfg;
+    state.eng                = eng;
+    state.planet_full        = planet_full;
+    state.planet_full_count  = planet_full_count;
     state.sim_time       = 0.0;
     state.transition_dur = eng->camera.transition_duration;
     state.active_body    = 0;       /* 0 = sun mode */

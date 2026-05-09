@@ -18,6 +18,7 @@
 #include "sokol_glue.h"
 #include "sokol_log.h"
 #include "sokol_time.h"
+#include "sokol_debugtext.h"
 
 #include "core/config.h"
 #include "core/log.h"
@@ -41,6 +42,9 @@ static struct {
     bool                  dragging;
     float                 press_x, press_y;
     float                 drag_total;
+
+    /* Smoothed FPS for the HUD so the number isn't jittery. */
+    float                 fps_smoothed;
 } app;
 
 static void on_init(void)
@@ -49,6 +53,13 @@ static void on_init(void)
         .environment = sglue_environment(),
         .logger.func = slog_func,
     });
+    /* HUD text. We only need one font for now — c64 is the chunkiest
+     * of the builtins so it stays readable on phones at high DPI. */
+    sdtx_setup(&(sdtx_desc_t){
+        .fonts       = { [0] = sdtx_font_c64() },
+        .logger.func = slog_func,
+    });
+
     stm_setup();
     app.last_ticks = stm_now();
 
@@ -77,11 +88,43 @@ static void on_frame(void)
     const int w = sapp_width();
     const int h = sapp_height();
 
+    /* HUD overlay. The c64 font is 8x8 cells, so a 2x logical canvas
+     * gives us ~16px characters at native resolution — readable on
+     * phones without a separate scale uniform. */
+    sdtx_canvas((float)w * 0.5f, (float)h * 0.5f);
+    sdtx_origin(1.0f, 1.0f);
+    sdtx_font(0);
+
+    /* exponential moving average so the FPS readout is steady */
+    float inst_fps = (dt > 1e-6) ? (float)(1.0 / dt) : 0.0f;
+    app.fps_smoothed += (inst_fps - app.fps_smoothed) * 0.05f;
+
+    sdtx_color3f(0.85f, 0.95f, 1.00f);
+    sdtx_printf("rts-engine-c  %dx%d  %4.0f fps\n", w, h, app.fps_smoothed);
+
+    sdtx_color3f(0.70f, 0.80f, 0.90f);
+    sdtx_printf("config: %s   bodies: %d  (sun + %d planets)\n",
+                app.cfg_loaded ? "loaded" : "MISSING",
+                app.cfg.planet_count + 1,
+                app.cfg.planet_count);
+
+    sdtx_color3f(0.95f, 0.85f, 0.50f);
+    sdtx_printf("view: %s%s   dist: %5.1f   az: %5.2f   el: %4.2f\n",
+                solarsystem_active_body_name(),
+                solarsystem_is_transitioning() ? " (zooming...)" : "",
+                app.camera.distance, app.camera.azimuth, app.camera.elevation);
+
+    sdtx_color3f(0.55f, 0.65f, 0.75f);
+    sdtx_printf("\nclick a planet to zoom in   ESC: back to sun   drag: orbit   scroll: zoom\n");
+
     sg_begin_pass(&(sg_pass){
         .action    = solarsystem_pass_action(),
         .swapchain = sglue_swapchain(),
     });
     solarsystem_frame(dt, w, h, &app.camera);
+    /* Text on top of the 3D scene. sdtx_draw() must run inside the
+     * same pass so it composites against the rendered geometry. */
+    sdtx_draw();
     sg_end_pass();
     sg_commit();
 }
@@ -154,6 +197,7 @@ static void on_event(const sapp_event *ev)
 static void on_cleanup(void)
 {
     solarsystem_shutdown();
+    sdtx_shutdown();
     sg_shutdown();
 }
 

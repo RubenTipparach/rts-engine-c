@@ -35,4 +35,11 @@ bool           solarsystem_pick(int sx, int sy, int fb_w, int fb_h,
 /* Force the camera back to the sun-centered view (Escape key, etc). */
 void           solarsystem_focus_sun(const camera_t *cam);
 
+/* Name of the body the camera is currently focused on (for debug HUD).
+ * Returns "Sol" in sun mode, the planet/moon name otherwise. */
+const char *   solarsystem_active_body_name(void);
+
+/* True while a click-zoom transition is animating, for debug HUD. */
+bool           solarsystem_is_transitioning(void);
+
 void           solarsystem_shutdown(void);

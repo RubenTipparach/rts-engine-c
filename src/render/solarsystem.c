@@ -48,6 +48,7 @@ typedef enum { BODY_SUN, BODY_PLANET, BODY_MOON } body_kind_t;
 
 typedef struct {
     body_kind_t kind;
+    char        name[CFG_NAME_LEN];
     sg_buffer   vbuf;
     HMM_Vec3    base_color;          /* for log + future use */
     float       radius;              /* world-space draw radius */
@@ -168,6 +169,8 @@ static void build_bodies(void)
     {
         body_entry_t *b = &state.bodies[state.body_count++];
         b->kind         = BODY_SUN;
+        snprintf(b->name, sizeof(b->name), "%s",
+                 state.cfg->sun.name[0] ? state.cfg->sun.name : "Sol");
         b->base_color   = state.cfg->sun.color;
         b->radius       = state.cfg->sun.radius;
         b->orbit_radius = 0.0f;
@@ -185,6 +188,7 @@ static void build_bodies(void)
         {
             body_entry_t *b = &state.bodies[state.body_count++];
             b->kind         = BODY_PLANET;
+            snprintf(b->name, sizeof(b->name), "%s", pl->self.name);
             b->base_color   = pl->self.color;
             b->radius       = pl->self.display_radius;
             b->orbit_radius = pl->self.orbit_radius;
@@ -199,6 +203,7 @@ static void build_bodies(void)
             const body_config_t *m = &pl->moons[j];
             body_entry_t *b = &state.bodies[state.body_count++];
             b->kind         = BODY_MOON;
+            snprintf(b->name, sizeof(b->name), "%s", m->name);
             b->base_color   = m->color;
             b->radius       = m->display_radius;
             b->orbit_radius = m->orbit_radius;
@@ -402,8 +407,11 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
     sg_apply_pipeline(state.orbit_pip);
     sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0] = state.orbit_vbuf });
 
-    /* TODO(engine.yaml): expose ring colour / alpha as a tunable. */
-    HMM_Vec4 ring_color = { .Elements = { 0.40f, 0.55f, 0.75f, 0.45f } };
+    /* Bright cool-blue, fully opaque against the dark background so
+     * the rings are obvious for the visual sanity check. Tone down /
+     * expose via engine.yaml later. GLES3 doesn't honour glLineWidth
+     * past 1.0 reliably, so colour is the only knob we have here. */
+    HMM_Vec4 ring_color = { .Elements = { 0.55f, 0.70f, 0.95f, 0.85f } };
 
     for (int i = 1; i < state.body_count; i++) {
         const body_entry_t *b = &state.bodies[i];
@@ -533,6 +541,19 @@ void solarsystem_pre_frame(double dt, camera_t *cam)
         /* Lock-on follow — planet is still orbiting. */
         cam->focus_target = target_focus;
     }
+}
+
+const char *solarsystem_active_body_name(void)
+{
+    if (!state.inited || state.active_body < 0 || state.active_body >= state.body_count) {
+        return "—";
+    }
+    return state.bodies[state.active_body].name;
+}
+
+bool solarsystem_is_transitioning(void)
+{
+    return state.transitioning;
 }
 
 void solarsystem_shutdown(void)

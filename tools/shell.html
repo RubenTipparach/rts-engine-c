@@ -8,19 +8,59 @@
   html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ccc;
                font-family: ui-monospace, monospace; overflow: hidden; }
   #canvas { display: block; width: 100vw; height: 100vh; outline: none; cursor: default; }
-  #status { position: fixed; left: 8px; bottom: 8px; font-size: 11px; opacity: 0.5;
-            pointer-events: none; }
+
+  /* Centered loading splash. Visible until the wasm signals "running",
+     then fades out. The bar fills as emscripten resolves preload deps. */
+  #splash { position: fixed; inset: 0; display: flex; align-items: center;
+            justify-content: center; background: #050810;
+            transition: opacity 320ms ease-out; z-index: 10; }
+  #splash.hidden { opacity: 0; pointer-events: none; }
+  #splash-inner { width: min(78vw, 420px); text-align: center;
+                  color: #cfe0ff; }
+  #splash-title { font-size: 22px; letter-spacing: 0.06em;
+                  color: #e8f1ff; margin: 0 0 6px; font-weight: 600; }
+  #splash-sub   { font-size: 12px; opacity: 0.6; margin: 0 0 20px; }
+  #splash-bar   { height: 6px; background: rgba(80,120,200,0.18);
+                  border-radius: 999px; overflow: hidden; }
+  #splash-fill  { display: block; height: 100%; width: 4%; background: #6ea0ff;
+                  border-radius: 999px; transition: width 220ms ease-out; }
+  /* Indeterminate sweep used for phases before any dependency count
+     is known (initial wasm fetch). Disables itself once we have a
+     real percentage. */
+  #splash-fill.indeterminate { width: 35%;
+    animation: splash-sweep 1.4s ease-in-out infinite alternate; }
+  @keyframes splash-sweep {
+    from { transform: translateX(-30%); }
+    to   { transform: translateX(220%); }
+  }
+  #splash-status { font-size: 12px; opacity: 0.85; margin-top: 14px; }
+
+  /* Tiny corner marker after the splash hides — helpful when debugging
+     a black canvas to confirm the page itself is alive. */
+  #status { position: fixed; left: 8px; bottom: 8px; font-size: 11px;
+            opacity: 0.4; pointer-events: none; color: #99c2ff; }
+
   /* Plain on-page error tray so failures are visible without opening
      a console (especially on mobile). Eruda below is the richer view. */
   #errors { position: fixed; left: 8px; right: 8px; top: 8px; max-height: 40vh;
             overflow: auto; font-size: 11px; line-height: 1.35; color: #ff8b8b;
             background: rgba(40, 0, 0, 0.85); border: 1px solid #882020;
             padding: 6px 8px; border-radius: 4px; display: none;
-            white-space: pre-wrap; word-break: break-word; }
+            white-space: pre-wrap; word-break: break-word; z-index: 20; }
 </style>
 </head>
 <body>
 <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
+
+<div id="splash">
+  <div id="splash-inner">
+    <h1 id="splash-title">rts-engine-c</h1>
+    <p  id="splash-sub">solar system • C + sokol_gfx + WebGL2</p>
+    <div id="splash-bar"><span id="splash-fill" class="indeterminate"></span></div>
+    <div id="splash-status">downloading…</div>
+  </div>
+</div>
+
 <div id="status">loading…</div>
 <div id="errors"></div>
 
@@ -30,13 +70,59 @@
 <script>
   if (window.eruda) eruda.init();
 
-  var statusEl = document.getElementById('status');
-  var errorsEl = document.getElementById('errors');
+  var statusEl       = document.getElementById('status');
+  var errorsEl       = document.getElementById('errors');
+  var splashEl       = document.getElementById('splash');
+  var splashStatusEl = document.getElementById('splash-status');
+  var splashFillEl   = document.getElementById('splash-fill');
+  var splashHidden   = false;
 
   function showError(msg) {
     if (!msg) return;
     errorsEl.style.display = 'block';
     errorsEl.textContent += msg + '\n';
+  }
+
+  function setSplashProgress(percent) {
+    splashFillEl.classList.remove('indeterminate');
+    splashFillEl.style.width = Math.max(4, Math.min(100, percent)) + '%';
+  }
+
+  function hideSplash() {
+    if (splashHidden) return;
+    splashHidden = true;
+    setSplashProgress(100);
+    splashStatusEl.textContent = 'running';
+    /* short delay so the user sees the bar finish + the title flash
+       to "running" before fading out — feels less abrupt. */
+    setTimeout(function(){
+      splashEl.classList.add('hidden');
+      /* fully remove from DOM after the fade so it can't intercept clicks */
+      setTimeout(function(){ if (splashEl.parentNode) splashEl.parentNode.removeChild(splashEl); }, 400);
+    }, 220);
+  }
+
+  function setStatus(text) {
+    if (statusEl) statusEl.textContent = text || '';
+    if (!splashHidden) splashStatusEl.textContent = text || '';
+  }
+
+  function isInfoLine(t) {
+    /* sokol_log uses bracketed prefixes like [sg][info] / [sapp][warning];
+     * our LOG_INFO/LOG_WARN macros prefix with literal "[info] " /
+     * "[warn] ". Anything that *isn't* an error gets a calm console.log
+     * instead of reddening the error tray. */
+    return typeof t === 'string' && (
+      t.indexOf('[info]') !== -1 ||
+      t.indexOf('[warning]') !== -1 ||
+      t.indexOf('[warn]') !== -1
+    );
+  }
+
+  function checkStartupSignal(t) {
+    if (typeof t === 'string' && t.indexOf('rts-engine-c started') !== -1) {
+      hideSplash();
+    }
   }
 
   var Module = {
@@ -48,19 +134,46 @@
       }, false);
       return c;
     })(),
-    print:    function(t){ console.log(t); },
-    printErr: function(t){ console.error(t); showError(t); },
-    setStatus: function(t){ if (statusEl) statusEl.textContent = t || ''; },
+    print: function(t){
+      console.log(t);
+      checkStartupSignal(t);
+    },
+    printErr: function(t){
+      if (isInfoLine(t)) {
+        console.log(t);
+      } else {
+        console.error(t);
+        showError(t);
+      }
+      /* LOG_INFO writes to stderr, so the startup signal arrives here. */
+      checkStartupSignal(t);
+    },
+    setStatus: setStatus,
     totalDependencies: 0,
     monitorRunDependencies: function(left) {
       this.totalDependencies = Math.max(this.totalDependencies, left);
-      Module.setStatus(left ? 'preparing… (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')' : 'running');
+      var done = this.totalDependencies - left;
+      if (this.totalDependencies > 0) {
+        var pct = (done / this.totalDependencies) * 100;
+        setSplashProgress(pct);
+      }
+      setStatus(left ? 'preparing… (' + done + '/' + this.totalDependencies + ')' : 'running');
+      if (left === 0) {
+        /* All preload deps resolved. Wait briefly for first frame; if
+           the C-side log hasn't fired yet, drop the splash anyway so
+           the user isn't stuck staring at it. */
+        setTimeout(hideSplash, 1200);
+      }
     }
   };
-  Module.setStatus('downloading…');
+  setStatus('downloading…');
+
   window.addEventListener('error', function(ev){
-    Module.setStatus('error — see console');
+    setStatus('error — see console');
     showError(ev.message + (ev.filename ? ' (' + ev.filename + ':' + ev.lineno + ')' : ''));
+    /* If startup faulted, drop the splash so the error tray is
+       visible — staying on the splash would hide what went wrong. */
+    setTimeout(hideSplash, 200);
   });
   window.addEventListener('unhandledrejection', function(ev){
     showError('unhandled rejection: ' + (ev.reason && ev.reason.message ? ev.reason.message : ev.reason));

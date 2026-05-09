@@ -36,6 +36,11 @@ static struct {
     uint64_t              last_ticks;
     solarsystem_config_t  cfg;
     engine_config_t       eng;
+    /* One full per-planet config per entry in cfg.planets[], indexed
+     * by the same planet index. Loaded eagerly from the configFile
+     * path each planet entry carries. */
+    planet_full_config_t  planet_full[CFG_MAX_PLANETS];
+    int                   planet_full_count;
     bool                  cfg_loaded;
     bool                  eng_loaded;
     camera_t              camera;
@@ -76,6 +81,21 @@ static void on_init(void)
 
     app.cfg_loaded = config_load_solarsystem("assets/config/solarsystem.yaml", &app.cfg);
     if (app.cfg_loaded) config_log_solarsystem(&app.cfg);
+
+    /* Each planet entry in solarsystem.yaml carries `configFile:` (e.g.
+     * "planets/earth.yaml") relative to assets/. Load each one for its
+     * surface + biome data — needed by the M2 mesh path. */
+    app.planet_full_count = 0;
+    for (int i = 0; i < app.cfg.planet_count && i < CFG_MAX_PLANETS; i++) {
+        const char *cf = app.cfg.planets[i].self.config_file;
+        if (cf[0] == '\0') continue;
+        char path[256];
+        snprintf(path, sizeof(path), "assets/%s", cf);
+        if (config_load_planet(path, &app.planet_full[app.planet_full_count])) {
+            config_log_planet(&app.planet_full[app.planet_full_count]);
+            app.planet_full_count++;
+        }
+    }
 
     camera_init_solarsystem(&app.camera, &app.eng);
     solarsystem_init(&app.cfg, &app.eng);

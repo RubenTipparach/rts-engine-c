@@ -381,6 +381,162 @@ bool config_load_engine(const char *path, engine_config_t *out)
     return true;
 }
 
+/* ============================================================
+ * Per-planet YAML — a few sections, a single nested list (terrain.levels).
+ * ============================================================ */
+
+static void planet_full_apply_defaults(planet_full_config_t *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->radius          = 1.0f;
+    p->subdivisions    = 4;
+    p->step_height     = 0.04f;
+    p->noise_frequency = 1.0f;
+}
+
+bool config_load_planet(const char *path, planet_full_config_t *out)
+{
+    planet_full_apply_defaults(out);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        LOG_ERROR("config: cannot open %s", path);
+        return false;
+    }
+
+    enum {
+        P_TOP,
+        P_TERRAIN,
+        P_TERRAIN_LEVELS,
+        P_GENERATION,
+        P_SKIP,            /* water / atmosphere / camera — known but unused */
+    } sect = P_TOP;
+    int level_idx = -1;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        strip_comment(line);
+        str_rstrip(line);
+
+        const char *probe = line;
+        while (*probe == ' ' || *probe == '\t') probe++;
+        if (*probe == '\0') continue;
+
+        int   indent = count_indent(line);
+        char *p      = line + indent;
+
+        bool list_item = false;
+        if (p[0] == '-' && p[1] == ' ') {
+            list_item = true;
+            p += 2;
+        }
+
+        char *colon = strchr(p, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        char *key = p;
+        char *val = colon + 1;
+        while (*val == ' ' || *val == '\t') val++;
+
+        char *key_end = key + strlen(key);
+        while (key_end > key && (key_end[-1] == ' ' || key_end[-1] == '\t')) *--key_end = '\0';
+
+        char  val_str[256];
+        float floats[16];
+        int   count;
+        parse_value(val, val_str, sizeof(val_str), floats, &count, 16);
+
+        /* Top-level dispatch by indent + key. Section headers reset
+         * the parser; bare top-level scalars go straight into out. */
+        if (indent == 0 && !list_item) {
+            if      (key_eq(key, "terrain"))     { sect = P_TERRAIN;    level_idx = -1; continue; }
+            else if (key_eq(key, "generation"))  { sect = P_GENERATION;                  continue; }
+            else if (key_eq(key, "water") || key_eq(key, "atmosphere")
+                  || key_eq(key, "camera")) {
+                sect = P_SKIP;
+                continue;
+            }
+
+            sect = P_TOP;
+            if      (key_eq(key, "name"))         snprintf(out->name, sizeof(out->name), "%s", val_str);
+            else if (key_eq(key, "radius")        && count >= 1) out->radius        = floats[0];
+            else if (key_eq(key, "subdivisions")  && count >= 1) out->subdivisions  = (int)floats[0];
+            else if (key_eq(key, "stepHeight")    && count >= 1) out->step_height   = floats[0];
+            continue;
+        }
+
+        switch (sect) {
+            case P_TERRAIN:
+                if (key_eq(key, "levels") && indent == 2) {
+                    sect = P_TERRAIN_LEVELS;
+                    level_idx = -1;
+                } else if (key_eq(key, "oceanLevel0") && indent == 2) {
+                    /* Accept "true"/"false" or 1/0; treat any non-empty
+                     * non-numeric scalar starting with 't'/'T' as true. */
+                    if (count >= 1) out->ocean_level0 = (floats[0] != 0.0f);
+                    else            out->ocean_level0 = (val_str[0] == 't' || val_str[0] == 'T');
+                }
+                break;
+
+            case P_TERRAIN_LEVELS:
+                if (list_item && indent == 4) {
+                    if (out->level_count < CFG_MAX_TERRAIN_LEVELS) {
+                        level_idx = out->level_count++;
+                        memset(&out->levels[level_idx], 0, sizeof(terrain_level_t));
+                        if (key_eq(key, "name")) {
+                            snprintf(out->levels[level_idx].name,
+                                     sizeof(out->levels[level_idx].name), "%s", val_str);
+                        }
+                    } else {
+                        level_idx = -1;
+                    }
+                } else if (level_idx >= 0 && indent == 6) {
+                    if (key_eq(key, "name")) {
+                        snprintf(out->levels[level_idx].name,
+                                 sizeof(out->levels[level_idx].name), "%s", val_str);
+                    } else if (key_eq(key, "color") && count >= 3) {
+                        out->levels[level_idx].color = (HMM_Vec3){
+                            .Elements = { floats[0], floats[1], floats[2] }
+                        };
+                    }
+                }
+                break;
+
+            case P_GENERATION:
+                if (indent == 2) {
+                    if      (key_eq(key, "seed")      && count >= 1) out->noise_seed      = (int)floats[0];
+                    else if (key_eq(key, "frequency") && count >= 1) out->noise_frequency = floats[0];
+                    else if (key_eq(key, "thresholds")) {
+                        int take = count < CFG_MAX_NOISE_THRESHOLDS
+                            ? count : CFG_MAX_NOISE_THRESHOLDS;
+                        for (int i = 0; i < take; i++) out->noise_thresholds[i] = floats[i];
+                        out->noise_threshold_count = take;
+                    }
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
+void config_log_planet(const planet_full_config_t *cfg)
+{
+    LOG_INFO("config: planet %-9s r=%.2f subdiv=%d gen=(seed=%d freq=%.2f thr=%d) levels=%d",
+             cfg->name, cfg->radius, cfg->subdivisions,
+             cfg->noise_seed, cfg->noise_frequency,
+             cfg->noise_threshold_count, cfg->level_count);
+    for (int i = 0; i < cfg->level_count; i++) {
+        const terrain_level_t *l = &cfg->levels[i];
+        LOG_INFO("config:   level[%d] %-10s color=(%.2f,%.2f,%.2f)",
+                 i, l->name, l->color.X, l->color.Y, l->color.Z);
+    }
+}
+
 void config_log_engine(const engine_config_t *cfg)
 {
     LOG_INFO("config: engine camera=(transitionDur=%.2fs elevation=%.2f sens=%.4f)",

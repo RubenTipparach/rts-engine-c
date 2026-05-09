@@ -105,3 +105,36 @@ typedef struct {
 void engine_config_apply_defaults(engine_config_t *cfg);
 bool config_load_engine(const char *path, engine_config_t *out);
 void config_log_engine(const engine_config_t *cfg);
+
+/* Per-planet config (assets/planets/*.yaml — referenced by `configFile`
+ * in solarsystem.yaml). Surface and biome data the M2 mesh + biome
+ * shader will consume; orbital / display fields stay denormalized in
+ * solarsystem.yaml's planet entry. The parser ignores sections it
+ * doesn't yet read (water, atmosphere, camera) so a copy-pasted
+ * upstream YAML works as-is. */
+
+#define CFG_MAX_TERRAIN_LEVELS  8
+
+typedef struct {
+    char     name[CFG_NAME_LEN];
+    HMM_Vec3 color;
+} terrain_level_t;
+
+typedef struct {
+    char            name[CFG_NAME_LEN];
+    float           radius;
+    int             subdivisions;
+    float           step_height;
+    bool            ocean_level0;
+
+    int             noise_seed;
+    float           noise_frequency;
+    float           noise_thresholds[CFG_MAX_NOISE_THRESHOLDS];
+    int             noise_threshold_count;
+
+    terrain_level_t levels[CFG_MAX_TERRAIN_LEVELS];
+    int             level_count;
+} planet_full_config_t;
+
+bool config_load_planet(const char *path, planet_full_config_t *out);
+void config_log_planet(const planet_full_config_t *cfg);

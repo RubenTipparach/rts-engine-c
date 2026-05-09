@@ -2,27 +2,54 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>rts-engine-c</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ccc;
                font-family: ui-monospace, monospace; overflow: hidden; }
   #canvas { display: block; width: 100vw; height: 100vh; outline: none; cursor: default; }
-  #status { position: fixed; left: 8px; bottom: 8px; font-size: 11px; opacity: 0.5; }
+  #status { position: fixed; left: 8px; bottom: 8px; font-size: 11px; opacity: 0.5;
+            pointer-events: none; }
+  /* Plain on-page error tray so failures are visible without opening
+     a console (especially on mobile). Eruda below is the richer view. */
+  #errors { position: fixed; left: 8px; right: 8px; top: 8px; max-height: 40vh;
+            overflow: auto; font-size: 11px; line-height: 1.35; color: #ff8b8b;
+            background: rgba(40, 0, 0, 0.85); border: 1px solid #882020;
+            padding: 6px 8px; border-radius: 4px; display: none;
+            white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body>
 <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
 <div id="status">loading…</div>
+<div id="errors"></div>
+
+<!-- Eruda: in-page mobile dev console. Tap the floating widget after load
+     to inspect logs / network / DOM. CDN-hosted; only loads on demand. -->
+<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
 <script>
+  if (window.eruda) eruda.init();
+
   var statusEl = document.getElementById('status');
+  var errorsEl = document.getElementById('errors');
+
+  function showError(msg) {
+    if (!msg) return;
+    errorsEl.style.display = 'block';
+    errorsEl.textContent += msg + '\n';
+  }
+
   var Module = {
     canvas: (function() {
       var c = document.getElementById('canvas');
-      c.addEventListener('webglcontextlost', function(e){ alert('WebGL context lost.'); e.preventDefault(); }, false);
+      c.addEventListener('webglcontextlost', function(e){
+        showError('WebGL context lost.');
+        e.preventDefault();
+      }, false);
       return c;
     })(),
     print:    function(t){ console.log(t); },
-    printErr: function(t){ console.error(t); },
+    printErr: function(t){ console.error(t); showError(t); },
     setStatus: function(t){ if (statusEl) statusEl.textContent = t || ''; },
     totalDependencies: 0,
     monitorRunDependencies: function(left) {
@@ -31,7 +58,13 @@
     }
   };
   Module.setStatus('downloading…');
-  window.onerror = function(){ Module.setStatus('error — see console'); };
+  window.addEventListener('error', function(ev){
+    Module.setStatus('error — see console');
+    showError(ev.message + (ev.filename ? ' (' + ev.filename + ':' + ev.lineno + ')' : ''));
+  });
+  window.addEventListener('unhandledrejection', function(ev){
+    showError('unhandled rejection: ' + (ev.reason && ev.reason.message ? ev.reason.message : ev.reason));
+  });
 </script>
 {{{ SCRIPT }}}
 </body>

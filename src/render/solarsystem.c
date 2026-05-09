@@ -60,12 +60,16 @@ static struct {
 #  define FS_VERSION "#version 330\n"
 #endif
 
+/* sokol_gfx's GL/GLES3 backend doesn't use real UBOs — `uniform_blocks[]`
+ * is just a packed-individual-uniforms description, set with
+ * glUniformXXX under the hood. So the shader declares *individual*
+ * uniforms (`uniform mat4 mvp;`), not a `layout(std140) uniform { ... }`
+ * block. The std140 layout hint on the C side enforces matching
+ * struct alignment, nothing more. */
 static const char *VS_SRC =
     VS_VERSION
-    "layout(std140) uniform vs_params {\n"
-    "    mat4 mvp;\n"
-    "    mat4 model;\n"
-    "};\n"
+    "uniform mat4 mvp;\n"
+    "uniform mat4 model;\n"
     "in vec3 a_pos;\n"
     "in vec3 a_normal;\n"
     "out vec3 v_normal_ws;\n"
@@ -76,10 +80,8 @@ static const char *VS_SRC =
 
 static const char *FS_SRC =
     FS_VERSION
-    "layout(std140) uniform fs_params {\n"
-    "    vec4 color;\n"
-    "    vec4 light_amb;\n"  /* xyz = world-space light dir (from sun outward), w = ambient */
-    "};\n"
+    "uniform vec4 color;\n"
+    "uniform vec4 light_amb;\n"  /* xyz = world-space light dir, w = ambient */
     "in vec3 v_normal_ws;\n"
     "out vec4 frag_color;\n"
     "void main() {\n"

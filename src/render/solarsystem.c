@@ -7,6 +7,7 @@
 #include "gen/solarsystem.glsl.h"
 #include "gen/orbit.glsl.h"
 #include "gen/atmosphere.glsl.h"
+#include "gen/starfield.glsl.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -36,6 +37,15 @@
  * count comes from engine.yaml solarSystemView.orbitRingSegments at
  * runtime — clamped to [8, ORBIT_RING_MAX_SEGMENTS]. */
 #define ORBIT_RING_MAX_SEGMENTS 128
+
+/* 1500 stars is enough to read as a busy starfield at typical screen
+ * sizes without overpainting the planets. All baked once at init. */
+#define STARFIELD_COUNT 1500
+
+typedef struct {
+    HMM_Vec3 pos;     /* unit-sphere direction (stars are at infinity) */
+    HMM_Vec3 color;   /* baked brightness + slight tint */
+} star_vertex_t;
 
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
@@ -111,6 +121,13 @@ static struct {
      * of the terrain mesh. */
     sg_shader    atmo_shd;
     sg_pipeline  atmo_pip;
+
+    /* Starfield — POINTS primitive, 1px stars at infinity. Drawn first
+     * each frame against an identity-translated view matrix so the
+     * stars rotate with the camera but never translate. */
+    sg_buffer    starfield_vbuf;
+    sg_shader    starfield_shd;
+    sg_pipeline  starfield_pip;
 
     double       sim_time;
 
@@ -308,6 +325,64 @@ static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const ch
         .label = label,
     });
 }
+
+/* ---- starfield ---- */
+
+/* Tiny LCG (numerical recipes constants) — deterministic seed-driven
+ * random for reproducible star placement across runs/builds. */
+static uint32_t star_lcg_next(uint32_t *s)
+{
+    *s = *s * 1664525u + 1013904223u;
+    return *s;
+}
+static float star_lcg_unit(uint32_t *s) { return (float)(star_lcg_next(s) >> 8) / (float)(1u << 24); }
+
+static void build_starfield(void)
+{
+    static star_vertex_t verts[STARFIELD_COUNT];
+    uint32_t seed = 0xDEADBEEFu;
+
+    for (int i = 0; i < STARFIELD_COUNT; i++) {
+        /* Marsaglia method for a uniform random direction on the
+         * unit sphere — avoids the pole-clustering that you get
+         * from picking lat/long uniformly. */
+        float u, v, s2;
+        do {
+            u = star_lcg_unit(&seed) * 2.0f - 1.0f;
+            v = star_lcg_unit(&seed) * 2.0f - 1.0f;
+            s2 = u * u + v * v;
+        } while (s2 >= 1.0f || s2 == 0.0f);
+        float t = sqrtf(1.0f - s2);
+        verts[i].pos = (HMM_Vec3){ .Elements = { 2.0f * u * t, 2.0f * v * t, 1.0f - 2.0f * s2 } };
+
+        /* Quantised brightness — pixel-art star palettes typically
+         * have a handful of intensity steps rather than continuous
+         * fade. ~70% dim, 22% medium, 7% bright, 1% very bright. */
+        float r       = star_lcg_unit(&seed);
+        float bright;
+        if      (r < 0.70f) bright = 0.18f;
+        else if (r < 0.92f) bright = 0.40f;
+        else if (r < 0.99f) bright = 0.70f;
+        else                bright = 1.00f;
+
+        /* Slight per-star tint — most stars white, some warm, some
+         * cool. Variation is tiny so the field reads as "stars" not
+         * "confetti." */
+        float tint = star_lcg_unit(&seed);
+        HMM_Vec3 col;
+        if      (tint < 0.30f) col = (HMM_Vec3){ .Elements = { 1.00f, 0.92f, 0.78f } }; /* warm */
+        else if (tint < 0.55f) col = (HMM_Vec3){ .Elements = { 0.85f, 0.92f, 1.00f } }; /* cool */
+        else                   col = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } }; /* white */
+        verts[i].color = HMM_MulV3F(col, bright);
+    }
+
+    state.starfield_vbuf = sg_make_buffer(&(sg_buffer_desc){
+        .data  = { .ptr = verts, .size = sizeof(verts) },
+        .label = "starfield-vbuf",
+    });
+}
+
+/* ---- geometry ---- */
 
 static void build_geometry(void)
 {
@@ -512,6 +587,30 @@ static void build_pipelines(void)
         .label = "orbit-pipeline",
     });
 
+    state.starfield_shd = sg_make_shader(starfield_starfield_shader_desc(backend));
+    state.starfield_pip = sg_make_pipeline(&(sg_pipeline_desc){
+        .shader = state.starfield_shd,
+        .layout = {
+            .buffers[0] = { .stride = sizeof(star_vertex_t) },
+            .attrs = {
+                [ATTR_starfield_starfield_aPos] = {
+                    .offset = offsetof(star_vertex_t, pos),
+                    .format = SG_VERTEXFORMAT_FLOAT3,
+                },
+                [ATTR_starfield_starfield_aColor] = {
+                    .offset = offsetof(star_vertex_t, color),
+                    .format = SG_VERTEXFORMAT_FLOAT3,
+                },
+            },
+        },
+        .primitive_type = SG_PRIMITIVETYPE_POINTS,
+        /* Stars sit at the far plane; disable depth-write so the
+         * solar system draws on top of them but stars don't fight
+         * each other. */
+        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
+        .label = "starfield-pipeline",
+    });
+
     state.atmo_shd = sg_make_shader(atmosphere_atmosphere_shader_desc(backend));
     state.atmo_pip = sg_make_pipeline(&(sg_pipeline_desc){
         .shader = state.atmo_shd,
@@ -579,6 +678,7 @@ void solarsystem_init(const solarsystem_config_t  *cfg,
     state.active_body    = 0;       /* 0 = sun mode */
     state.transitioning  = false;
     build_geometry();
+    build_starfield();
     build_bodies();
     build_pipelines();
     state.inited = true;
@@ -626,7 +726,25 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
     HMM_Vec3 world_pos[MAX_BODIES];
     resolve_world_positions(world_pos);
 
-    /* Sun first. */
+    /* Starfield first — far behind everything else. View matrix has
+     * its translation zeroed so stars stay locked to the camera's
+     * orientation but never translate, giving the celestial-sphere
+     * illusion. Depth comparison is ALWAYS, so stars overwrite the
+     * clear color but don't fight against each other. */
+    {
+        HMM_Mat4 view_no_trans       = view;
+        view_no_trans.Columns[3]     = (HMM_Vec4){ .Elements = { 0, 0, 0, 1 } };
+        HMM_Mat4 sky_mvp             = HMM_MulM4(proj, view_no_trans);
+        starfield_star_vs_params_t svsp;
+        memcpy(svsp.mvp, &sky_mvp, sizeof(sky_mvp));
+
+        sg_apply_pipeline(state.starfield_pip);
+        sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0] = state.starfield_vbuf });
+        sg_apply_uniforms(UB_starfield_star_vs_params, &(sg_range){ &svsp, sizeof(svsp) });
+        sg_draw(0, STARFIELD_COUNT, 1);
+    }
+
+    /* Sun next. */
     {
         const body_entry_t *b = &state.bodies[0];
         HMM_Mat4 model = HMM_MulM4(HMM_Translate(world_pos[0]),
@@ -899,10 +1017,13 @@ void solarsystem_shutdown(void)
     sg_destroy_pipeline(state.ss_pip);
     sg_destroy_pipeline(state.atmo_pip);
     sg_destroy_pipeline(state.sun_pip);
+    sg_destroy_pipeline(state.starfield_pip);
     sg_destroy_shader(state.orbit_shd);
     sg_destroy_shader(state.ss_shd);
     sg_destroy_shader(state.atmo_shd);
     sg_destroy_shader(state.sun_shd);
+    sg_destroy_shader(state.starfield_shd);
+    sg_destroy_buffer(state.starfield_vbuf);
     for (int i = 0; i < state.body_count; i++) {
         sg_destroy_buffer(state.bodies[i].vbuf);
         if (state.bodies[i].has_water)      sg_destroy_buffer(state.bodies[i].water_vbuf);

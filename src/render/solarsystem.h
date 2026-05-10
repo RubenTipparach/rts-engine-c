@@ -13,7 +13,14 @@
 #include "render/camera.h"
 #include "sokol_gfx.h"
 
-void           solarsystem_init(const solarsystem_config_t *cfg);
+/* Initialize the renderer with the parsed YAML configs. `planet_full`
+ * is an array of per-planet full configs in the same order as
+ * cfg->planets[]; pass NULL/0 to fall back to the planet's flat
+ * colour from solarsystem.yaml (no biome bands). */
+void           solarsystem_init(const solarsystem_config_t  *cfg,
+                                const engine_config_t       *eng,
+                                const planet_full_config_t  *planet_full,
+                                int                          planet_full_count);
 sg_pass_action solarsystem_pass_action(void);
 
 /* Run before solarsystem_frame() — slides the camera's focus_target

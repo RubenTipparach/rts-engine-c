@@ -19,6 +19,8 @@
 
 #include "HandmadeMath.h"
 
+#include "core/config.h"
+
 typedef struct {
     HMM_Vec3 focus_target;
     float    azimuth;
@@ -35,7 +37,11 @@ typedef struct {
     float    dist_min, dist_max;
 } camera_t;
 
-void     camera_init_solarsystem(camera_t *c);
+/* Initialize the orbit camera for the solar-system view from the
+ * loaded engine config. Fields that engine.yaml doesn't expose
+ * (fov_y_deg, near/far, zoom_sens, elev_min/max) keep their compiled-
+ * in defaults — those are upstream's hardcoded values too. */
+void     camera_init_solarsystem(camera_t *c, const engine_config_t *eng);
 void     camera_orbit(camera_t *c, float dx_pixels, float dy_pixels);
 void     camera_zoom(camera_t *c, float dy);
 HMM_Vec3 camera_eye(const camera_t *c);

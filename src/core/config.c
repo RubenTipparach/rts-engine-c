@@ -256,6 +256,330 @@ bool config_load_solarsystem(const char *path, solarsystem_config_t *out)
     return true;
 }
 
+/* ============================================================
+ * engine.yaml — section-keyed, scalar + vec3, same parser primitives.
+ * ============================================================ */
+
+void engine_config_apply_defaults(engine_config_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->camera.transition_duration   = 1.5f;
+    cfg->camera.default_elevation     = 0.4f;
+    cfg->camera.pixels_to_radians     = 0.005f;
+
+    cfg->lighting.sun_direction       = (HMM_Vec3){ .Elements = { 0.5f, 0.7f, 0.5f } };
+    cfg->lighting.ambient_intensity   = 0.15f;
+    cfg->lighting.diffuse_intensity   = 0.85f;
+
+    cfg->solar_system_view.default_distance       = 80.0f;
+    cfg->solar_system_view.min_distance           = 10.0f;
+    cfg->solar_system_view.max_distance           = 200.0f;
+    cfg->solar_system_view.sphere_segments_planet = 40;
+    cfg->solar_system_view.sphere_segments_sun    = 48;
+    cfg->solar_system_view.sphere_segments_moon   = 24;
+    cfg->solar_system_view.orbit_ring_segments    = 64;
+    cfg->solar_system_view.moon_orbit_segments    = 32;
+    cfg->solar_system_view.pick_radius_multiplier = 3.0f;
+}
+
+static void engine_set_camera(camera_engine_t *c, const char *key,
+                              const float *fl, int n)
+{
+    if      (key_eq(key, "transitionDuration") && n >= 1) c->transition_duration = fl[0];
+    else if (key_eq(key, "defaultElevation")   && n >= 1) c->default_elevation   = fl[0];
+    else if (key_eq(key, "pixelsToRadians")    && n >= 1) c->pixels_to_radians   = fl[0];
+}
+
+static void engine_set_lighting(lighting_engine_t *l, const char *key,
+                                const float *fl, int n)
+{
+    if      (key_eq(key, "sunDirection")     && n >= 3) l->sun_direction = (HMM_Vec3){ .Elements = { fl[0], fl[1], fl[2] } };
+    else if (key_eq(key, "ambientIntensity") && n >= 1) l->ambient_intensity = fl[0];
+    else if (key_eq(key, "diffuseIntensity") && n >= 1) l->diffuse_intensity = fl[0];
+}
+
+static void engine_set_solarsystem_view(solarsystem_view_engine_t *v, const char *key,
+                                        const float *fl, int n)
+{
+    if      (key_eq(key, "defaultDistance")      && n >= 1) v->default_distance       = fl[0];
+    else if (key_eq(key, "minDistance")          && n >= 1) v->min_distance           = fl[0];
+    else if (key_eq(key, "maxDistance")          && n >= 1) v->max_distance           = fl[0];
+    else if (key_eq(key, "sphereSegmentsPlanet") && n >= 1) v->sphere_segments_planet = (int)fl[0];
+    else if (key_eq(key, "sphereSegmentsSun")    && n >= 1) v->sphere_segments_sun    = (int)fl[0];
+    else if (key_eq(key, "sphereSegmentsMoon")   && n >= 1) v->sphere_segments_moon   = (int)fl[0];
+    else if (key_eq(key, "orbitRingSegments")    && n >= 1) v->orbit_ring_segments    = (int)fl[0];
+    else if (key_eq(key, "moonOrbitSegments")    && n >= 1) v->moon_orbit_segments    = (int)fl[0];
+    else if (key_eq(key, "pickRadiusMultiplier") && n >= 1) v->pick_radius_multiplier = fl[0];
+}
+
+bool config_load_engine(const char *path, engine_config_t *out)
+{
+    engine_config_apply_defaults(out);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        LOG_ERROR("config: cannot open %s", path);
+        return false;
+    }
+
+    /* Sections we don't yet consume parse to "skip" so unknown keys
+     * inside them are silently ignored — matches the CLAUDE.md rule
+     * that omitted-or-zero fields keep the compiled-in default. */
+    enum {
+        E_NONE,
+        E_CAMERA,
+        E_LIGHTING,
+        E_SOLAR_VIEW,
+        E_SKIP,
+    } sect = E_NONE;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        strip_comment(line);
+        str_rstrip(line);
+
+        const char *probe = line;
+        while (*probe == ' ' || *probe == '\t') probe++;
+        if (*probe == '\0') continue;
+
+        int   indent = count_indent(line);
+        char *p      = line + indent;
+        if (p[0] == '-' && p[1] == ' ') continue;        /* engine.yaml has no list items */
+
+        char *colon = strchr(p, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        char *key = p;
+        char *val = colon + 1;
+        while (*val == ' ' || *val == '\t') val++;
+
+        char *key_end = key + strlen(key);
+        while (key_end > key && (key_end[-1] == ' ' || key_end[-1] == '\t')) *--key_end = '\0';
+
+        if (indent == 0) {
+            if      (key_eq(key, "camera"))          sect = E_CAMERA;
+            else if (key_eq(key, "lighting"))        sect = E_LIGHTING;
+            else if (key_eq(key, "solarSystemView")) sect = E_SOLAR_VIEW;
+            else                                      sect = E_SKIP;
+            continue;
+        }
+
+        char  val_str[256];
+        float floats[16];
+        int   count;
+        parse_value(val, val_str, sizeof(val_str), floats, &count, 16);
+
+        switch (sect) {
+            case E_CAMERA:     engine_set_camera(&out->camera, key, floats, count); break;
+            case E_LIGHTING:   engine_set_lighting(&out->lighting, key, floats, count); break;
+            case E_SOLAR_VIEW: engine_set_solarsystem_view(&out->solar_system_view, key, floats, count); break;
+            default: break;
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
+/* ============================================================
+ * Per-planet YAML — a few sections, a single nested list (terrain.levels).
+ * ============================================================ */
+
+static void planet_full_apply_defaults(planet_full_config_t *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->radius          = 1.0f;
+    p->subdivisions    = 4;
+    p->step_height     = 0.04f;
+    p->noise_frequency = 1.0f;
+}
+
+bool config_load_planet(const char *path, planet_full_config_t *out)
+{
+    planet_full_apply_defaults(out);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        LOG_ERROR("config: cannot open %s", path);
+        return false;
+    }
+
+    enum {
+        P_TOP,
+        P_TERRAIN,
+        P_TERRAIN_LEVELS,
+        P_GENERATION,
+        P_WATER,
+        P_ATMOSPHERE,
+        P_SKIP,            /* camera — known but unused */
+    } sect = P_TOP;
+    int level_idx = -1;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        strip_comment(line);
+        str_rstrip(line);
+
+        const char *probe = line;
+        while (*probe == ' ' || *probe == '\t') probe++;
+        if (*probe == '\0') continue;
+
+        int   indent = count_indent(line);
+        char *p      = line + indent;
+
+        bool list_item = false;
+        if (p[0] == '-' && p[1] == ' ') {
+            list_item = true;
+            p += 2;
+        }
+
+        char *colon = strchr(p, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        char *key = p;
+        char *val = colon + 1;
+        while (*val == ' ' || *val == '\t') val++;
+
+        char *key_end = key + strlen(key);
+        while (key_end > key && (key_end[-1] == ' ' || key_end[-1] == '\t')) *--key_end = '\0';
+
+        char  val_str[256];
+        float floats[16];
+        int   count;
+        parse_value(val, val_str, sizeof(val_str), floats, &count, 16);
+
+        /* Top-level dispatch by indent + key. Section headers reset
+         * the parser; bare top-level scalars go straight into out. */
+        if (indent == 0 && !list_item) {
+            if      (key_eq(key, "terrain"))     { sect = P_TERRAIN;    level_idx = -1; continue; }
+            else if (key_eq(key, "generation"))  { sect = P_GENERATION;                  continue; }
+            else if (key_eq(key, "water"))       { sect = P_WATER;      out->has_water = true;       continue; }
+            else if (key_eq(key, "atmosphere"))  { sect = P_ATMOSPHERE; out->has_atmosphere = true;  continue; }
+            else if (key_eq(key, "camera"))      { sect = P_SKIP; continue; }
+
+            sect = P_TOP;
+            if      (key_eq(key, "name"))         snprintf(out->name, sizeof(out->name), "%s", val_str);
+            else if (key_eq(key, "radius")        && count >= 1) out->radius        = floats[0];
+            else if (key_eq(key, "subdivisions")  && count >= 1) out->subdivisions  = (int)floats[0];
+            else if (key_eq(key, "stepHeight")    && count >= 1) out->step_height   = floats[0];
+            continue;
+        }
+
+        switch (sect) {
+            case P_TERRAIN:
+                if (key_eq(key, "levels") && indent == 2) {
+                    sect = P_TERRAIN_LEVELS;
+                    level_idx = -1;
+                } else if (key_eq(key, "oceanLevel0") && indent == 2) {
+                    /* Accept "true"/"false" or 1/0; treat any non-empty
+                     * non-numeric scalar starting with 't'/'T' as true. */
+                    if (count >= 1) out->ocean_level0 = (floats[0] != 0.0f);
+                    else            out->ocean_level0 = (val_str[0] == 't' || val_str[0] == 'T');
+                }
+                break;
+
+            case P_TERRAIN_LEVELS:
+                if (list_item && indent == 4) {
+                    if (out->level_count < CFG_MAX_TERRAIN_LEVELS) {
+                        level_idx = out->level_count++;
+                        memset(&out->levels[level_idx], 0, sizeof(terrain_level_t));
+                        if (key_eq(key, "name")) {
+                            snprintf(out->levels[level_idx].name,
+                                     sizeof(out->levels[level_idx].name), "%s", val_str);
+                        }
+                    } else {
+                        level_idx = -1;
+                    }
+                } else if (level_idx >= 0 && indent == 6) {
+                    if (key_eq(key, "name")) {
+                        snprintf(out->levels[level_idx].name,
+                                 sizeof(out->levels[level_idx].name), "%s", val_str);
+                    } else if (key_eq(key, "color") && count >= 3) {
+                        out->levels[level_idx].color = (HMM_Vec3){
+                            .Elements = { floats[0], floats[1], floats[2] }
+                        };
+                    }
+                }
+                break;
+
+            case P_GENERATION:
+                if (indent == 2) {
+                    if      (key_eq(key, "seed")      && count >= 1) out->noise_seed      = (int)floats[0];
+                    else if (key_eq(key, "frequency") && count >= 1) out->noise_frequency = floats[0];
+                    else if (key_eq(key, "thresholds")) {
+                        int take = count < CFG_MAX_NOISE_THRESHOLDS
+                            ? count : CFG_MAX_NOISE_THRESHOLDS;
+                        for (int i = 0; i < take; i++) out->noise_thresholds[i] = floats[i];
+                        out->noise_threshold_count = take;
+                    }
+                }
+                break;
+
+            case P_WATER:
+                if (indent == 2) {
+                    if      (key_eq(key, "fogColor")   && count >= 3) {
+                        out->water_color = (HMM_Vec3){
+                            .Elements = { floats[0], floats[1], floats[2] }
+                        };
+                    }
+                    else if (key_eq(key, "fogDensity") && count >= 1) out->water_fog_density = floats[0];
+                }
+                break;
+
+            case P_ATMOSPHERE:
+                if (indent == 2) {
+                    if      (key_eq(key, "innerRadiusMul") && count >= 1) out->atmosphere_inner_mul    = floats[0];
+                    else if (key_eq(key, "outerRadiusMul") && count >= 1) out->atmosphere_outer_mul    = floats[0];
+                    else if (key_eq(key, "sunIntensity")   && count >= 1) out->atmosphere_sun_intensity = floats[0];
+                    else if (key_eq(key, "sunDirection")   && count >= 3) {
+                        out->atmosphere_sun_dir = (HMM_Vec3){
+                            .Elements = { floats[0], floats[1], floats[2] }
+                        };
+                    }
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
+void config_log_planet(const planet_full_config_t *cfg)
+{
+    LOG_INFO("config: planet %-9s r=%.2f subdiv=%d gen=(seed=%d freq=%.2f thr=%d) levels=%d",
+             cfg->name, cfg->radius, cfg->subdivisions,
+             cfg->noise_seed, cfg->noise_frequency,
+             cfg->noise_threshold_count, cfg->level_count);
+    for (int i = 0; i < cfg->level_count; i++) {
+        const terrain_level_t *l = &cfg->levels[i];
+        LOG_INFO("config:   level[%d] %-10s color=(%.2f,%.2f,%.2f)",
+                 i, l->name, l->color.X, l->color.Y, l->color.Z);
+    }
+}
+
+void config_log_engine(const engine_config_t *cfg)
+{
+    LOG_INFO("config: engine camera=(transitionDur=%.2fs elevation=%.2f sens=%.4f)",
+             cfg->camera.transition_duration, cfg->camera.default_elevation,
+             cfg->camera.pixels_to_radians);
+    LOG_INFO("config: engine view=(dist=%.1f range=[%.1f,%.1f] pickMult=%.2f rings=%d)",
+             cfg->solar_system_view.default_distance,
+             cfg->solar_system_view.min_distance,
+             cfg->solar_system_view.max_distance,
+             cfg->solar_system_view.pick_radius_multiplier,
+             cfg->solar_system_view.orbit_ring_segments);
+    LOG_INFO("config: engine light=(ambient=%.2f diffuse=%.2f sunDir=(%.2f,%.2f,%.2f))",
+             cfg->lighting.ambient_intensity,
+             cfg->lighting.diffuse_intensity,
+             cfg->lighting.sun_direction.X,
+             cfg->lighting.sun_direction.Y,
+             cfg->lighting.sun_direction.Z);
+}
+
 void config_log_solarsystem(const solarsystem_config_t *cfg)
 {
     LOG_INFO("config: sun=%s r=%.2f color=(%.2f,%.2f,%.2f) glow=%.2f coronaSpeed=%.2f",

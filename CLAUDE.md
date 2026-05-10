@@ -91,11 +91,24 @@ These rules apply to every asset Claude generates, hand-edits, or asks
 the user to drop into the repo. Keep them in mind whenever a task
 involves "generate a model / texture / animation".
 
+The intended look for **generated/baked assets** is **pixel art**:
+chunky, low-res, deliberately limited palettes. This applies to
+textures, sprites, and baked sprite sheets — not to live procedural
+shaders or runtime mesh code, which can use whatever maths they need
+to. Examples in scope: terrain atlas PNGs, font glyph atlases,
+particle masks, UI sprites, animation frame sheets. Out of scope:
+Lambert lighting on the planet shader, atmosphere scattering, the
+sun's procedural noise.
+
 - **Textures** — if the task involves generating textures, the result
-  must be baked to PNG (8-bit RGBA, ≤32×32 unless the existing pipeline
-  allows otherwise) and committed under `assets/textures/`. Build-time
-  conversions (e.g., to `.sprite` or compressed formats) are derived
-  artifacts — do not commit them, only the source PNG.
+  must be baked to PNG (8-bit RGBA, **≤64×64**) and committed under
+  `assets/textures/`. Anything bigger reads as "modern texture art"
+  and breaks the pixel-art aesthetic. Most use cases (terrain
+  patches, UI sprites, particle masks) are well-served by 16×16 or
+  32×32; reserve 64×64 for cases that genuinely need the resolution
+  (e.g. a font atlas or a hero sprite). Build-time conversions
+  (e.g., to `.sprite` or compressed formats) are derived artifacts —
+  do not commit them, only the source PNG.
 - **3D models** — this is a procedural game, so the default for new 3D
   content is to generate it procedurally in code (mesh built at runtime
   from parameters, the way planets / orbit rings / starfields already
@@ -116,6 +129,25 @@ involves "generate a model / texture / animation".
   pattern of the reference repo's `tools/gen_*.py`: a Python entry
   point that writes out the baked artifact deterministically, with no
   third-party deps beyond stdlib + Pillow + numpy + zlib.
+
+## Touch-screen compatible by default
+
+This game ships to the web first, so every input the player needs
+must work on a touch screen. Mouse-only or keyboard-only paths
+(`SAPP_EVENTTYPE_MOUSE_SCROLL` for zoom, `SAPP_KEYCODE_ESCAPE` to
+back out, right-click for context, etc.) need a touch equivalent —
+pinch-to-zoom, single-tap, double-tap, on-screen UI button — in the
+**same commit** that introduces the desktop interaction.
+
+Sokol's touch events arrive as `SAPP_EVENTTYPE_TOUCHES_BEGAN /
+MOVED / ENDED / CANCELLED` with a `touches[]` array and
+`num_touches`. On phones and tablets these fire instead of (or in
+addition to) the mouse events. Touch handlers should be additive —
+keep the mouse paths working for desktop users — and any flow that
+*requires* a keyboard press must also be reachable through tapping.
+
+When in doubt, sanity-check on mobile (Eruda's already wired into
+the web shell for that reason).
 
 ## Sokol & shader pipeline
 

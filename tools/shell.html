@@ -7,7 +7,16 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ccc;
                font-family: ui-monospace, monospace; overflow: hidden; }
-  #canvas { display: block; width: 100vw; height: 100vh; outline: none; cursor: default; }
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; cursor: default;
+            /* Suppress browser default gestures so the wasm gets every
+               touch event raw — without this, mobile Chrome/Safari
+               eats two-finger pinches for page zoom and double-taps
+               for zoom-to-element, and the C side never sees them. */
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none; }
 
   /* Centered loading splash. Visible until the wasm signals "running",
      then fades out. The bar fills as emscripten resolves preload deps. */
@@ -167,6 +176,28 @@
     }
   };
   setStatus('downloading…');
+
+  /* Belt-and-braces touch wiring. sokol_app already registers
+     emscripten touch callbacks on #canvas, but on some mobile
+     browsers (notably Chrome with default-passive listener policy)
+     preventDefault() doesn't take effect from sokol's path, so the
+     browser steals two-finger pinches for page zoom and double-taps
+     for zoom-to-element. Attaching our own passive:false listeners
+     and calling preventDefault here suppresses that, and lets sokol's
+     own listeners fire normally on the same events. */
+  (function(){
+    var c = document.getElementById('canvas');
+    if (!c) return;
+    function block(e){ e.preventDefault(); }
+    ['touchstart','touchmove','touchend','touchcancel'].forEach(function(t){
+      c.addEventListener(t, block, { passive: false });
+    });
+    /* iOS Safari fires gesturestart/change/end as a separate path for
+       two-finger pinches; block those too. */
+    ['gesturestart','gesturechange','gestureend'].forEach(function(t){
+      c.addEventListener(t, block);
+    });
+  })();
 
   window.addEventListener('error', function(ev){
     setStatus('error — see console');

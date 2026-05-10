@@ -28,6 +28,7 @@ SRC_C := \
 	src/main.c \
 	src/core/config.c \
 	src/core/log.c \
+	src/core/noise.c \
 	src/render/camera.c \
 	src/render/solarsystem.c \
 	src/render/sphere.c
@@ -86,7 +87,9 @@ endif
 SHDC_TARGETS := glsl410:glsl300es
 
 GEN_DIR    := src/gen
-GEN_HDRS   := $(GEN_DIR)/sun.glsl.h $(GEN_DIR)/solarsystem.glsl.h $(GEN_DIR)/orbit.glsl.h
+GEN_HDRS   := $(GEN_DIR)/sun.glsl.h $(GEN_DIR)/solarsystem.glsl.h \
+              $(GEN_DIR)/orbit.glsl.h $(GEN_DIR)/atmosphere.glsl.h \
+              $(GEN_DIR)/starfield.glsl.h
 
 .PHONY: all native web run serve clean shaders
 

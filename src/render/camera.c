@@ -2,29 +2,28 @@
 
 #include <math.h>
 
-/* Compiled-in defaults from the upstream `engine.yaml` (camera +
- * solarSystemView sections) and SolarSystemRenderer.cs constants. They
- * stay live as defaults even after engine.yaml is wired in — the YAML
- * just overrides any field whose YAML value is non-zero (per the
- * config-merge convention in CLAUDE.md). */
-void camera_init_solarsystem(camera_t *c)
+/* Camera state is split between the engine.yaml-driven knobs and
+ * the upstream-hardcoded ones. The latter (FOV, near/far, zoom_sens,
+ * elev_min/max) aren't in upstream's engine.yaml either, so they
+ * stay as compile-time constants here until someone surfaces them. */
+void camera_init_solarsystem(camera_t *c, const engine_config_t *eng)
 {
     *c = (camera_t){
         .focus_target = (HMM_Vec3){ .Elements = { 0.0f, 0.0f, 0.0f } },
         .azimuth      = 0.0f,
-        .elevation    = 0.4f,      /* engine.yaml camera.defaultElevation */
-        .distance     = 80.0f,     /* engine.yaml solarSystemView.defaultDistance */
+        .elevation    = eng->camera.default_elevation,
+        .distance     = eng->solar_system_view.default_distance,
 
         .fov_y_deg    = 50.0f,
         .near_plane   = 0.5f,
         .far_plane    = 10000.0f,
 
-        .orbit_sens   = 0.005f,    /* engine.yaml camera.pixelsToRadians */
+        .orbit_sens   = eng->camera.pixels_to_radians,
         .zoom_sens    = 0.001f,
         .elev_min     = 0.1f,
         .elev_max     = 1.5f,
-        .dist_min     = 10.0f,     /* engine.yaml solarSystemView.minDistance */
-        .dist_max     = 200.0f,    /* engine.yaml solarSystemView.maxDistance */
+        .dist_min     = eng->solar_system_view.min_distance,
+        .dist_max     = eng->solar_system_view.max_distance,
     };
 }
 

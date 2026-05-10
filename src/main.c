@@ -63,6 +63,11 @@ static struct {
     bool                  pinching;
     float                 pinch_prev_dist;
 
+    /* Diagnostics so the HUD can show whether touch events are
+     * reaching us at all on a mobile browser. */
+    int                   touch_event_count;
+    int                   touch_max_fingers;
+
     /* Smoothed FPS for the HUD so the number isn't jittery. */
     float                 fps_smoothed;
 } app;
@@ -156,6 +161,10 @@ static void on_frame(void)
 
     sdtx_color3f(0.55f, 0.65f, 0.75f);
     sdtx_printf("\nclick a planet to zoom in   ESC: back to sun   drag: orbit   scroll: zoom\n");
+    sdtx_printf("touch: tap=pick   1-finger drag=orbit   pinch=zoom\n");
+    sdtx_color3f(0.55f, 0.85f, 0.65f);
+    sdtx_printf("touch events: %d   max fingers seen: %d   pinching: %s\n",
+                app.touch_event_count, app.touch_max_fingers, app.pinching ? "YES" : "no");
 
     sg_begin_pass(&(sg_pass){
         .action    = solarsystem_pass_action(),
@@ -236,6 +245,8 @@ static void on_event(const sapp_event *ev)
          * priority, so once a second finger lands we cancel the
          * single-finger drag and start tracking pinch distance. */
         case SAPP_EVENTTYPE_TOUCHES_BEGAN:
+            app.touch_event_count++;
+            if (ev->num_touches > app.touch_max_fingers) app.touch_max_fingers = ev->num_touches;
             if (ev->num_touches == 1) {
                 app.touch_active     = true;
                 app.touch_dragging   = false;
@@ -257,6 +268,8 @@ static void on_event(const sapp_event *ev)
             break;
 
         case SAPP_EVENTTYPE_TOUCHES_MOVED:
+            app.touch_event_count++;
+            if (ev->num_touches > app.touch_max_fingers) app.touch_max_fingers = ev->num_touches;
             if (app.pinching && ev->num_touches >= 2) {
                 float dx = ev->touches[1].pos_x - ev->touches[0].pos_x;
                 float dy = ev->touches[1].pos_y - ev->touches[0].pos_y;
@@ -289,6 +302,7 @@ static void on_event(const sapp_event *ev)
 
         case SAPP_EVENTTYPE_TOUCHES_ENDED:
         case SAPP_EVENTTYPE_TOUCHES_CANCELLED:
+            app.touch_event_count++;
             if (app.pinching) {
                 /* End pinch as soon as any finger lifts; if a single
                  * finger remains we don't try to re-promote it to a

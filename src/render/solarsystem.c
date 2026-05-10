@@ -539,30 +539,63 @@ static void build_bodies(void)
              * The Nishita shader picks colour from Rayleigh
              * wavelengths × sunIntensity, so we just plumb the YAML
              * knobs through. Sun intensity falls back to upstream's
-             * 30.0 default if the YAML omits it. */
+             * 30.0 default if the YAML omits it.
+             *
+             * The YAML's outerRadiusMul (1.5 for Earth) leaves a big
+             * visible shell gap between the planet's surface (radius
+             * 1.0) and the bright atmospheric limb (radius 1.5). We
+             * shrink the *thickness* of the atmosphere by 0.4 so the
+             * limb hugs the planet, while keeping the YAML pristine.
+             *   visible_outer = 1.0 + (yaml_outer - 1.0) * 0.4 */
             if (biome_path && full->has_atmosphere && full->atmosphere_outer_mul > 1.0f) {
-                b->atmo_vbuf          = build_atmosphere_vbuf(full->atmosphere_outer_mul, pl->self.name);
-                b->atmo_outer_mul     = full->atmosphere_outer_mul;
+                const float ATMO_THICKNESS_SCALE = 0.4f;
+                float visible_outer = 1.0f + (full->atmosphere_outer_mul - 1.0f) * ATMO_THICKNESS_SCALE;
+                b->atmo_vbuf          = build_atmosphere_vbuf(visible_outer, pl->self.name);
+                b->atmo_outer_mul     = visible_outer;
                 b->atmo_sun_intensity = (full->atmosphere_sun_intensity > 0.0f)
                     ? full->atmosphere_sun_intensity : 30.0f;
                 b->has_atmosphere     = true;
             }
 
-            /* Cloud layers — enabled for any planet with both water
-             * AND atmosphere (a cheap proxy for "wet, breathable"
-             * worlds). Two layers per planet: a denser low layer at
-             * ~ planet+5% radius, a wispier high layer at +9%. The
-             * shader's `params` is (drift_time, scale, threshold,
-             * bump_strength); cloud_color is rgb + max alpha. The
-             * drift_time vec is updated per-frame from sim_time,
-             * the rest is static per-planet. */
-            if (biome_path && full->has_water && full->has_atmosphere) {
+            /* Cloud layers — every planet with an atmosphere gets some
+             * variant of weather. Per-planet colour + density makes
+             * the four worlds visually distinct from a distance:
+             *   Earth  — white, full coverage
+             *   Glacius — pale blue, icy
+             *   Venus  — yellowish, thick / opaque
+             *   Mars   — dusty red, thin / sparse
+             * If the planet doesn't have atmosphere, no clouds. */
+            if (biome_path && full->has_atmosphere) {
+                HMM_Vec3 lo_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
+                HMM_Vec3 hi_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
+                float    lo_alpha = 0.85f;
+                float    hi_alpha = 0.40f;
+                float    lo_thresh = 0.50f;
+                float    hi_thresh = 0.55f;
+                /* Cheap per-planet identification by biome palette
+                 * (avoids adding another YAML field for now). The
+                 * lookup is by name match in the body entry. */
+                if (strcmp(b->name, "Glacius") == 0) {
+                    lo_color = (HMM_Vec3){ .Elements = { 0.90f, 0.95f, 1.00f } };
+                    hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.90f, 1.00f } };
+                    lo_alpha = 0.70f; hi_alpha = 0.30f;
+                } else if (strcmp(b->name, "Venus") == 0) {
+                    lo_color = (HMM_Vec3){ .Elements = { 0.95f, 0.85f, 0.55f } };
+                    hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.70f, 0.40f } };
+                    lo_alpha = 0.95f; hi_alpha = 0.65f;
+                    lo_thresh = 0.35f; hi_thresh = 0.40f;
+                } else if (strcmp(b->name, "Mars") == 0) {
+                    lo_color = (HMM_Vec3){ .Elements = { 0.85f, 0.55f, 0.40f } };
+                    hi_color = (HMM_Vec3){ .Elements = { 0.75f, 0.50f, 0.40f } };
+                    lo_alpha = 0.35f; hi_alpha = 0.20f;
+                    lo_thresh = 0.60f; hi_thresh = 0.65f;
+                }
                 b->cloud_vbuf[0]   = build_cloud_vbuf(1.05f, "clouds-low");
-                b->cloud_color[0]  = (HMM_Vec4){ .Elements = { 1.00f, 1.00f, 1.00f, 0.85f } };
-                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, 0.50f, 4.0f } };
+                b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
+                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 4.0f } };
                 b->cloud_vbuf[1]   = build_cloud_vbuf(1.09f, "clouds-high");
-                b->cloud_color[1]  = (HMM_Vec4){ .Elements = { 1.00f, 1.00f, 1.00f, 0.40f } };
-                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, 0.55f, 3.0f } };
+                b->cloud_color[1]  = (HMM_Vec4){ .Elements = { hi_color.X, hi_color.Y, hi_color.Z, hi_alpha } };
+                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 3.0f } };
                 b->cloud_layers    = 2;
             }
         }

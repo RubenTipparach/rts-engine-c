@@ -856,10 +856,12 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         HMM_Mat4 model  = HMM_MulM4(HMM_Translate(wp),
                                     HMM_Scale((HMM_Vec3){ .Elements = { b->radius, b->radius, b->radius } }));
         HMM_Mat4 mvp    = HMM_MulM4(view_proj, model);
-        /* Sun is at origin; its light at this body points from origin
-         * outward to the body, so the surface light direction is from
-         * sun toward body = world_pos. The shader normalizes. */
-        HMM_Vec3 sun_dir = wp;
+        /* Sun is at world origin; the planet shader's `sunDir` is the
+         * direction *from the surface toward the sun* (standard
+         * Lambert convention — `dot(N, L) > 0` on the lit hemisphere).
+         * That's `-normalize(wp)`. Earlier this was passing `wp` and
+         * lighting the *far* hemisphere by accident. */
+        HMM_Vec3 sun_dir = HMM_NormV3(HMM_MulV3F(wp, -1.0f));
 
         solarsystem_ss_vs_params_t vsp;
         memcpy(vsp.mvp, &mvp, sizeof(mvp));

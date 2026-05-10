@@ -85,36 +85,20 @@ The only exception is values that are part of an algorithm's
 semantic meaning, it just makes the hash work. Those stay inline,
 because exposing them would invite breakage rather than tuning.
 
-## Visual aesthetic — pixel art
-
-The intended look of this project is **pixel art**: chunky, low-res,
-deliberately limited palettes, visible stair-stepping over smooth
-gradients. Every visual choice should lean into that — palette-driven
-flat colours, hard edges between regions, dithered transitions
-instead of antialiased ones, no soft fades or large gradient washes
-that read as "modern realistic."
-
-Design implications:
-
-- Texture *resolution* is bounded — see the texture rule below.
-- Procedural meshes and shaders should prefer stepped output over
-  smooth: discrete biome cells are right, vertex-interpolated
-  gradient blends across cells are wrong. Bayer dithering is fine
-  (it's the pixel-art way to fade an edge).
-- When picking colours, use the per-planet YAML palettes literally —
-  don't add post-process exposure / saturation passes that wash them
-  toward "filmic." If a planet's biome list says
-  `[0.30, 0.65, 0.25]`, that's the green you want on screen.
-- New shaders that exist purely for "looks better" with no pixel-art
-  affordance (heavy bloom, screen-space AO, motion blur) should be
-  avoided unless they have a pixel-friendly form (e.g. a quantised
-  bloom that snaps to N steps).
-
 ## Static game asset guidelines
 
 These rules apply to every asset Claude generates, hand-edits, or asks
 the user to drop into the repo. Keep them in mind whenever a task
 involves "generate a model / texture / animation".
+
+The intended look for **generated/baked assets** is **pixel art**:
+chunky, low-res, deliberately limited palettes. This applies to
+textures, sprites, and baked sprite sheets — not to live procedural
+shaders or runtime mesh code, which can use whatever maths they need
+to. Examples in scope: terrain atlas PNGs, font glyph atlases,
+particle masks, UI sprites, animation frame sheets. Out of scope:
+Lambert lighting on the planet shader, atmosphere scattering, the
+sun's procedural noise.
 
 - **Textures** — if the task involves generating textures, the result
   must be baked to PNG (8-bit RGBA, **≤64×64**) and committed under
@@ -145,6 +129,25 @@ involves "generate a model / texture / animation".
   pattern of the reference repo's `tools/gen_*.py`: a Python entry
   point that writes out the baked artifact deterministically, with no
   third-party deps beyond stdlib + Pillow + numpy + zlib.
+
+## Touch-screen compatible by default
+
+This game ships to the web first, so every input the player needs
+must work on a touch screen. Mouse-only or keyboard-only paths
+(`SAPP_EVENTTYPE_MOUSE_SCROLL` for zoom, `SAPP_KEYCODE_ESCAPE` to
+back out, right-click for context, etc.) need a touch equivalent —
+pinch-to-zoom, single-tap, double-tap, on-screen UI button — in the
+**same commit** that introduces the desktop interaction.
+
+Sokol's touch events arrive as `SAPP_EVENTTYPE_TOUCHES_BEGAN /
+MOVED / ENDED / CANCELLED` with a `touches[]` array and
+`num_touches`. On phones and tablets these fire instead of (or in
+addition to) the mouse events. Touch handlers should be additive —
+keep the mouse paths working for desktop users — and any flow that
+*requires* a keyboard press must also be reachable through tapping.
+
+When in doubt, sanity-check on mobile (Eruda's already wired into
+the web shell for that reason).
 
 ## Sokol & shader pipeline
 

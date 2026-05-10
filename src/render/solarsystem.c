@@ -952,7 +952,16 @@ bool solarsystem_pick(int sx, int sy, int fb_w, int fb_h, const camera_t *cam)
         }
     }
 
-    if (best_i < 0) return false;
+    if (best_i < 0) {
+        /* Tap on empty space while zoomed onto a planet → slide back
+         * to the sun view. This is the touch equivalent of ESC since
+         * mobile users have no keyboard (per CLAUDE.md). */
+        if (state.active_body != 0) {
+            solarsystem_focus_sun(cam);
+            return true;
+        }
+        return false;
+    }
 
     if (best_i == 0) {
         solarsystem_focus_sun(cam);

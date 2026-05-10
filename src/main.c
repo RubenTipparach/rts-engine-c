@@ -50,6 +50,19 @@ static struct {
     float                 press_x, press_y;
     float                 drag_total;
 
+    /* Touch input. Single-finger drag mirrors the mouse drag path;
+     * two-finger pinch drives camera_zoom. CLAUDE.md mandates
+     * touch parity for any new interaction. */
+    bool                  touch_active;       /* one finger down */
+    float                 touch_press_x;
+    float                 touch_press_y;
+    float                 touch_last_x;
+    float                 touch_last_y;
+    float                 touch_drag_total;
+    bool                  touch_dragging;
+    bool                  pinching;
+    float                 pinch_prev_dist;
+
     /* Smoothed FPS for the HUD so the number isn't jittery. */
     float                 fps_smoothed;
 } app;
@@ -213,6 +226,85 @@ static void on_event(const sapp_event *ev)
         case SAPP_EVENTTYPE_KEY_DOWN:
             if (ev->key_code == SAPP_KEYCODE_ESCAPE) {
                 solarsystem_focus_sun(&app.camera);
+            }
+            break;
+
+        /* ---- touch input — required for the web build per CLAUDE.md. ----
+         *
+         * Single-finger gesture: tap (no drag) → pick; drag → orbit.
+         * Two-finger gesture: pinch → zoom. The 2-finger path takes
+         * priority, so once a second finger lands we cancel the
+         * single-finger drag and start tracking pinch distance. */
+        case SAPP_EVENTTYPE_TOUCHES_BEGAN:
+            if (ev->num_touches == 1) {
+                app.touch_active     = true;
+                app.touch_dragging   = false;
+                app.touch_press_x    = ev->touches[0].pos_x;
+                app.touch_press_y    = ev->touches[0].pos_y;
+                app.touch_last_x     = ev->touches[0].pos_x;
+                app.touch_last_y     = ev->touches[0].pos_y;
+                app.touch_drag_total = 0.0f;
+            } else if (ev->num_touches >= 2) {
+                /* Promote to pinch — abandon any in-flight 1-finger drag
+                 * so we don't accidentally orbit while pinching. */
+                app.touch_active   = false;
+                app.touch_dragging = false;
+                app.pinching       = true;
+                float dx = ev->touches[1].pos_x - ev->touches[0].pos_x;
+                float dy = ev->touches[1].pos_y - ev->touches[0].pos_y;
+                app.pinch_prev_dist = sqrtf(dx * dx + dy * dy);
+            }
+            break;
+
+        case SAPP_EVENTTYPE_TOUCHES_MOVED:
+            if (app.pinching && ev->num_touches >= 2) {
+                float dx = ev->touches[1].pos_x - ev->touches[0].pos_x;
+                float dy = ev->touches[1].pos_y - ev->touches[0].pos_y;
+                float d  = sqrtf(dx * dx + dy * dy);
+                /* Spread → zoom in (positive delta into camera_zoom);
+                 * a 1:1 ratio with pixels gives a comfortable feel
+                 * given the existing zoom_sens of 0.001. */
+                float delta = d - app.pinch_prev_dist;
+                if (fabsf(delta) > 0.0f) camera_zoom(&app.camera, delta);
+                app.pinch_prev_dist = d;
+            } else if (app.touch_active && ev->num_touches == 1) {
+                float nx = ev->touches[0].pos_x;
+                float ny = ev->touches[0].pos_y;
+                float dx = nx - app.touch_last_x;
+                float dy = ny - app.touch_last_y;
+                app.touch_last_x = nx;
+                app.touch_last_y = ny;
+                app.touch_drag_total += fabsf(dx) + fabsf(dy);
+                if (!app.touch_dragging
+                    && app.touch_drag_total > DRAG_VS_CLICK_THRESHOLD_PX) {
+                    app.touch_dragging = true;
+                }
+                if (app.touch_dragging) {
+                    /* Touch deltas are already in pixels — same scale
+                     * camera_orbit expects from a locked-mouse drag. */
+                    camera_orbit(&app.camera, dx, dy);
+                }
+            }
+            break;
+
+        case SAPP_EVENTTYPE_TOUCHES_ENDED:
+        case SAPP_EVENTTYPE_TOUCHES_CANCELLED:
+            if (app.pinching) {
+                /* End pinch as soon as any finger lifts; if a single
+                 * finger remains we don't try to re-promote it to a
+                 * drag (that would feel jumpy). */
+                if (ev->num_touches < 2) app.pinching = false;
+            } else if (app.touch_active
+                       && ev->type == SAPP_EVENTTYPE_TOUCHES_ENDED
+                       && !app.touch_dragging
+                       && app.touch_drag_total <= DRAG_VS_CLICK_THRESHOLD_PX) {
+                /* Tap → pick. */
+                solarsystem_pick((int)app.touch_press_x, (int)app.touch_press_y,
+                                 sapp_width(), sapp_height(), &app.camera);
+            }
+            if (ev->num_touches <= 1) {
+                app.touch_active   = false;
+                app.touch_dragging = false;
             }
             break;
 

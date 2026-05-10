@@ -30,6 +30,7 @@ SRC_C := \
 	src/core/log.c \
 	src/core/noise.c \
 	src/render/camera.c \
+	src/render/goldberg.c \
 	src/render/solarsystem.c \
 	src/render/sphere.c
 

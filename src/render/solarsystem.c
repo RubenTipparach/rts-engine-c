@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "core/noise.h"
+#include "render/goldberg.h"
 #include "render/sphere.h"
 #include "gen/sun.glsl.h"
 #include "gen/solarsystem.glsl.h"
@@ -50,6 +51,11 @@ typedef struct {
 
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
+
+/* Goldberg subdiv 3 → 642 cells → ~11520 fan-triangulated verts.
+ * Scratch sized to a comfortable upper bound so a future bump to
+ * subdiv 4 (2562 cells → ~46k verts) just needs a buffer change. */
+#define BIOME_VBUF_MAX      16384
 
 typedef struct {
     HMM_Vec3 pos;        /* 0  */
@@ -179,12 +185,20 @@ static int                   s_unit_v_count;
 static int                   s_unit_i_count;
 static sphere_full_vertex_t  s_full_scratch[SPHERE_MAX_VERTS];
 
-/* Cell-stepped biome path — duplicates the per-quad verts so adjacent
- * cells with different biomes get crisp colour boundaries. Sized for
- * one vertex per index in the original sphere mesh, since that's the
- * upper bound when no edges are shared. */
-static sphere_full_vertex_t  s_biome_scratch[SPHERE_MAX_INDICES];
-static uint16_t              s_biome_indices[SPHERE_MAX_INDICES];
+/* Goldberg cell-stepped biome path — fan-triangulated verts per cell,
+ * duplicated across cells so adjacent biomes render with crisp
+ * colour breaks. */
+static sphere_full_vertex_t  s_biome_scratch[BIOME_VBUF_MAX];
+static uint16_t              s_biome_indices[BIOME_VBUF_MAX];
+
+/* Goldberg cell list — built once at init from a level-3 icosphere.
+ * Shared across every biome planet (same subdiv → same cell layout);
+ * per-planet differences are baked into the per-vertex colour. */
+static goldberg_cell_t       s_goldberg_cells[GOLDBERG_MAX_CELLS];
+static int                   s_goldberg_cell_count;
+/* Index count of the biome ibuf — set after the first planet builds
+ * so the shared sequential ibuf can be sized correctly. */
+static int                   s_biome_index_count;
 
 static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *label)
 {
@@ -287,70 +301,61 @@ static int planet_biome_index(HMM_Vec3 unit_pos, const planet_full_config_t *p)
     return biome;
 }
 
-/* Cell-stepped biome bake. Walks the sphere mesh one *quad* at a time
- * (two consecutive triangles share the quad's biome), samples noise
- * at the quad centroid, then emits 6 fresh verts (3 per triangle)
- * each displaced radially inward by the biome's step. Adjacent quads
- * with different biomes don't share verts, so colour boundaries are
- * crisp and the height drop creates a visible cliff between cells.
+/* Goldberg cell-stepped biome bake. Walks the precomputed Goldberg
+ * cells (each cell is a hex or penta polygon on the unit sphere),
+ * samples noise at the cell centre, picks a biome, and fan-emits
+ * triangles around the cell with the biome's colour and the
+ * biome-driven cliff drop applied to *all* the cell's verts. Adjacent
+ * cells of different biomes don't share verts, so colour boundaries
+ * are crisp and the radial drop creates a visible cliff at the seam.
  *
- * step_unit = step_height / planet_radius converts the upstream's
- * world-space step into unit-sphere coordinates so the model matrix
- * scaling stays linear. Highest biome stays at the unit-sphere
- * surface; each lower biome drops by `(max_level - biome) * step_unit`. */
-static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const char *label)
+ *   step_unit = step_height / planet_radius
+ *   drop      = (max_level - biome) * step_unit
+ *   r         = 1.0 - drop
+ *
+ * The fan-triangle layout is (centre, corner[i], corner[(i+1) mod N])
+ * so each cell contributes N triangles — 5 for pentagons, 6 for
+ * hexagons. Triangle winding is CCW from outside the sphere because
+ * the corners themselves are ordered CCW around the centre's outward
+ * normal. */
+static sg_buffer build_planet_goldberg_vbuf(const planet_full_config_t *p, const char *label,
+                                             int *out_index_count)
 {
-    int v_out      = 0;
-    int max_level  = (p->level_count > 0) ? (p->level_count - 1) : 0;
+    int v_out     = 0;
+    int max_level = (p->level_count > 0) ? (p->level_count - 1) : 0;
     /* If radius is zero (shouldn't happen but be defensive) skip the
      * height step so we still draw a colour-only sphere instead of
      * collapsing to the origin. */
     float step_unit = (p->radius > 0.0f && p->step_height > 0.0f)
         ? (p->step_height / p->radius) : 0.0f;
 
-    /* Each quad is 6 consecutive indices in the sphere ibuf
-     * (a-c-b, a-d-c — see sphere_make_uv()). */
-    for (int q = 0; q + 6 <= s_unit_i_count; q += 6) {
-        uint16_t ia = s_unit_indices[q + 0];
-        uint16_t ic = s_unit_indices[q + 1];
-        uint16_t ib = s_unit_indices[q + 2];
-        uint16_t id = s_unit_indices[q + 4];
+    for (int c = 0; c < s_goldberg_cell_count; c++) {
+        const goldberg_cell_t *cell = &s_goldberg_cells[c];
 
-        HMM_Vec3 ua = s_unit_verts[ia].pos;
-        HMM_Vec3 ub = s_unit_verts[ib].pos;
-        HMM_Vec3 uc = s_unit_verts[ic].pos;
-        HMM_Vec3 ud = s_unit_verts[id].pos;
-
-        HMM_Vec3 cen = HMM_NormV3((HMM_Vec3){
-            .Elements = {
-                (ua.X + ub.X + uc.X + ud.X) * 0.25f,
-                (ua.Y + ub.Y + uc.Y + ud.Y) * 0.25f,
-                (ua.Z + ub.Z + uc.Z + ud.Z) * 0.25f,
-            }
-        });
-        int      biome = planet_biome_index(cen, p);
+        int      biome = planet_biome_index(cell->center, p);
         HMM_Vec3 col   = (p->level_count > 0 && biome < p->level_count)
             ? p->levels[biome].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
 
-        float drop = step_unit * (float)(max_level - biome);
-        float r    = 1.0f - drop;
-        HMM_Vec3 pa = HMM_MulV3F(ua, r);
-        HMM_Vec3 pb = HMM_MulV3F(ub, r);
-        HMM_Vec3 pc = HMM_MulV3F(uc, r);
-        HMM_Vec3 pd = HMM_MulV3F(ud, r);
+        float    drop = step_unit * (float)(max_level - biome);
+        float    r    = 1.0f - drop;
+        HMM_Vec3 ctr  = HMM_MulV3F(cell->center, r);
 
-        /* Triangle 1: a-c-b. Normals stay radial (= the unit-sphere
-         * direction) so lighting on the cell-top reads correctly even
-         * after the inward push. */
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, ua, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, uc, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pb, ub, col, 1.0f };
-        /* Triangle 2: a-d-c */
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, ua, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pd, ud, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, uc, col, 1.0f };
+        for (int k = 0; k < cell->corner_count; k++) {
+            HMM_Vec3 c0 = HMM_MulV3F(cell->corners[k], r);
+            HMM_Vec3 c1 = HMM_MulV3F(cell->corners[(k + 1) % cell->corner_count], r);
+
+            /* Normals stay radial (= the unit-sphere direction) so
+             * Lambert reads correctly across the cell top even after
+             * the inward radial push. */
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ ctr, cell->center,                                  col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c0,  cell->corners[k],                              col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c1,  cell->corners[(k + 1) % cell->corner_count],   col, 1.0f };
+        }
     }
+
+    if (out_index_count) *out_index_count = v_out;
+
     return sg_make_buffer(&(sg_buffer_desc){
         .data  = { .ptr = s_biome_scratch,
                    .size = (size_t)v_out * sizeof(sphere_full_vertex_t) },
@@ -433,16 +438,30 @@ static void build_geometry(void)
     });
     state.index_count = s_unit_i_count;
 
-    /* Sequential ibuf for the cell-stepped biome path. Indexes into
-     * each planet's per-quad-duplicated vbuf, where each triangle's
-     * three verts are stored contiguously. */
-    for (int i = 0; i < s_unit_i_count; i++) {
+    /* Goldberg hex sphere — replaces the UV sphere for biome planets.
+     * Built once at level 3 (642 cells); promote to a per-planet
+     * subdivision when we want Earth coarser than Glacius, etc. */
+    if (!goldberg_make(3, s_goldberg_cells, GOLDBERG_MAX_CELLS, &s_goldberg_cell_count)) {
+        LOG_ERROR("solarsystem: goldberg mesh did not fit in static buffers");
+        s_goldberg_cell_count = 0;
+    }
+
+    /* Compute the goldberg biome vert count up front (every planet
+     * uses the same cell layout, so the count is fixed): 5 fan-tris
+     * per pentagon and 6 per hexagon, 3 verts per tri. */
+    s_biome_index_count = 0;
+    for (int i = 0; i < s_goldberg_cell_count; i++) {
+        s_biome_index_count += s_goldberg_cells[i].corner_count * 3;
+    }
+
+    /* Sequential ibuf for the cell-stepped biome path. */
+    for (int i = 0; i < s_biome_index_count && i < BIOME_VBUF_MAX; i++) {
         s_biome_indices[i] = (uint16_t)i;
     }
     state.ibuf_biome = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .index_buffer = true },
         .data  = { .ptr = s_biome_indices,
-                   .size = (size_t)s_unit_i_count * sizeof(uint16_t) },
+                   .size = (size_t)s_biome_index_count * sizeof(uint16_t) },
         .label = "sphere-biome-ibuf",
     });
 
@@ -506,15 +525,18 @@ static void build_bodies(void)
             b->parent_index = -1;
             b->zoom_min     = pl->self.zoom_min;
             b->zoom_max     = pl->self.zoom_max;
-            /* If the per-planet YAML loaded successfully, use its
-             * biome levels for cell-stepped per-quad colour; otherwise
-             * fall back to the flat colour from solarsystem.yaml. */
+            /* If the per-planet YAML loaded successfully *and* the
+             * Goldberg mesh built, use cell-stepped colour. Otherwise
+             * fall back to the smooth UV-sphere with the planet's
+             * flat colour. */
             bool biome_path = (full && full->level_count > 0
-                                    && full->noise_threshold_count > 0);
+                                    && full->noise_threshold_count > 0
+                                    && s_goldberg_cell_count > 0);
             if (biome_path) {
-                b->vbuf       = build_planet_biome_vbuf(full, pl->self.name);
+                int gidx = 0;
+                b->vbuf       = build_planet_goldberg_vbuf(full, pl->self.name, &gidx);
                 b->ibuf       = state.ibuf_biome;
-                b->draw_count = state.index_count;
+                b->draw_count = gidx;
             } else {
                 b->vbuf       = build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
                 b->ibuf       = state.ibuf;

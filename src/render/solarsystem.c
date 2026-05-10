@@ -693,12 +693,19 @@ static void build_bodies(void)
              *   Mars   — dusty red, thin / sparse
              * If the planet doesn't have atmosphere, no clouds. */
             if (biome_path && full->has_atmosphere) {
+                /* Default values — most planets are white with full
+                 * coverage. Per-planet overrides below shape the
+                 * look (icy/yellow/dust). Thresholds dropped to 0.30
+                 * so clouds are unambiguously visible (mean fbm sample
+                 * is ~0.47, so ~70% of cells now have alpha>0). If you
+                 * see clouds you don't want, narrow the threshold;
+                 * if you see none, that's a real bug. */
                 HMM_Vec3 lo_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
                 HMM_Vec3 hi_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
                 float    lo_alpha = 0.85f;
-                float    hi_alpha = 0.40f;
-                float    lo_thresh = 0.50f;
-                float    hi_thresh = 0.55f;
+                float    hi_alpha = 0.45f;
+                float    lo_thresh = 0.30f;
+                float    hi_thresh = 0.35f;
                 /* Cheap per-planet identification by biome palette
                  * (avoids adding another YAML field for now). The
                  * lookup is by name match in the body entry. */
@@ -714,8 +721,8 @@ static void build_bodies(void)
                 } else if (strcmp(b->name, "Mars") == 0) {
                     lo_color = (HMM_Vec3){ .Elements = { 0.85f, 0.55f, 0.40f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.75f, 0.50f, 0.40f } };
-                    lo_alpha = 0.35f; hi_alpha = 0.20f;
-                    lo_thresh = 0.60f; hi_thresh = 0.65f;
+                    lo_alpha = 0.55f; hi_alpha = 0.30f;
+                    lo_thresh = 0.45f; hi_thresh = 0.50f;
                 }
                 /* Cloud altitudes sit just above the highest biome
                  * peak so they don't clip into snow caps. With

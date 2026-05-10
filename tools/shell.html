@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- GitHub Pages serves with a 10-minute browser cache by default,
+     which is painful on mobile during iteration. Asking the browser
+     to revalidate every load means new builds show up immediately
+     after the deploy completes; the wasm + .data files still get
+     cache benefit because they're separate URLs. -->
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>rts-engine-c</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ccc;

@@ -52,12 +52,11 @@ typedef struct {
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
 
-/* Goldberg subdiv 3 → 642 cells → ~11520 fan-triangulated verts for
- * the cell tops, plus up to ~11556 more for the cliff walls between
- * cells of different biomes (every edge counted once). Sized to
- * 32768 to give comfortable headroom; bump again for subdiv 4 if
- * we ever ship that. */
-#define BIOME_VBUF_MAX      32768
+/* Goldberg subdiv 3 → 642 cells. Each cell emits up to 6 hex tris
+ * for the top fan + up to 6 walls × 4 tris (double-sided) = 30
+ * tris per cell × 3 verts = 90 verts per cell. 642 × 90 = 57780,
+ * comfortably under the uint16 cap. */
+#define BIOME_VBUF_MAX      65535
 
 typedef struct {
     HMM_Vec3 pos;        /* 0  */
@@ -320,47 +319,71 @@ static int planet_biome_index(HMM_Vec3 unit_pos, const planet_full_config_t *p)
  * hexagons. Triangle winding is CCW from outside the sphere because
  * the corners themselves are ordered CCW around the centre's outward
  * normal. */
+/* Replicates upstream PlanetMesh.cs's EmitCellGeometry exactly (modulo
+ * chamfer + slopes — those are a follow-up). Every cell sits at
+ * absolute heights anchored to the planet surface (radius 1.0 in
+ * body-local space), not radial drops:
+ *
+ *   level_h(0) = 1.0 + 0.75 * step_unit   // water surface
+ *   level_h(k) = 1.0 + k    * step_unit   // for k > 0
+ *
+ * Level-0 cells are special: they emit a *seabed fan* at radius 1.0
+ * (the planet base), NOT at level_h(0). For ocean planets the
+ * separate water shell mesh sits above them at level_h(0) so the
+ * water visually covers the seabed; for non-ocean planets level-0
+ * cells just read as recessed canyons. Walls from a land cell to a
+ * level-0 neighbour drop to the seabed (1.0), not to level_h(0).
+ *
+ * Walls are double-sided (4 triangles per wall) so they're visible
+ * from either face — matches upstream's two-sided index winding and
+ * means the slope/chamfer follow-ups don't need special-casing for
+ * culling direction.
+ *
+ * Suppression: at each shared edge, only the higher of the two
+ * cells emits the wall (the lower skips). For cells of equal level,
+ * neither emits anything — adjacent same-level tops meet flush. */
 static sg_buffer build_planet_goldberg_vbuf(const planet_full_config_t *p, const char *label,
                                              int *out_index_count)
 {
     int v_out     = 0;
-    int max_level = (p->level_count > 0) ? (p->level_count - 1) : 0;
     float step_unit = (p->radius > 0.0f && p->step_height > 0.0f)
-        ? (p->step_height / p->radius) : 0.0f;
+        ? (p->step_height / p->radius) : 0.04f;
 
-    /* Pre-pass: classify every cell into its biome + remember the
-     * radial drop so the wall pass below can compare across edges
-     * without re-sampling noise. */
-    static int   cell_biome[GOLDBERG_MAX_CELLS];
-    static float cell_drop[GOLDBERG_MAX_CELLS];
+    /* Convert biome index → absolute radial distance (in unit-sphere
+     * space). Mirrors PlanetMesh.LevelH(byte). */
+    #define LEVEL_H(level) ((level) == 0 ? (1.0f + 0.75f * step_unit) \
+                                         : (1.0f + (float)(level) * step_unit))
+    /* Wall to a level-0 neighbour from a land cell drops to the
+     * seabed, which sits at the planet base (radius 1.0). */
+    const float SEABED_H = 1.0f;
+
+    /* Pre-pass: classify every cell. */
+    static int cell_level[GOLDBERG_MAX_CELLS];
     for (int c = 0; c < s_goldberg_cell_count; c++) {
-        int b          = planet_biome_index(s_goldberg_cells[c].center, p);
-        cell_biome[c]  = b;
-        cell_drop[c]   = step_unit * (float)(max_level - b);
+        cell_level[c] = planet_biome_index(s_goldberg_cells[c].center, p);
     }
 
-    /* Pass 1 — cell tops. Each cell fan-triangulates from its centre
-     * out to consecutive corner pairs, all displaced inward by the
-     * cell's biome drop. Normals stay radial (the unit-sphere
-     * direction) so Lambert lighting on the cell top reads as if
-     * the cell were tangent to the sphere. */
+    /* Pass 1 — cell tops + level-0 seabeds. */
     for (int c = 0; c < s_goldberg_cell_count; c++) {
         const goldberg_cell_t *cell = &s_goldberg_cells[c];
-
-        int      biome = cell_biome[c];
-        HMM_Vec3 col   = (p->level_count > 0 && biome < p->level_count)
-            ? p->levels[biome].color
+        int      level = cell_level[c];
+        HMM_Vec3 col   = (p->level_count > 0 && level < p->level_count)
+            ? p->levels[level].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
 
-        float    drop = cell_drop[c];
-        float    r    = 1.0f - drop;
-        HMM_Vec3 ctr  = HMM_MulV3F(cell->center, r);
+        /* Level-0 cells emit only a seabed fan at radius 1.0 (no top
+         * fan at the water surface — that's the separate water
+         * mesh's job for ocean planets, and recessed canyons read
+         * correctly for non-ocean). Other levels emit their top fan
+         * at level_h(level). */
+        float    h   = (level == 0) ? SEABED_H : LEVEL_H(level);
+        HMM_Vec3 ctr = HMM_MulV3F(cell->center, h);
 
         for (int k = 0; k < cell->corner_count; k++) {
             HMM_Vec3 u_k0 = cell->corners[k];
             HMM_Vec3 u_k1 = cell->corners[(k + 1) % cell->corner_count];
-            HMM_Vec3 c0   = HMM_MulV3F(u_k0, r);
-            HMM_Vec3 c1   = HMM_MulV3F(u_k1, r);
+            HMM_Vec3 c0   = HMM_MulV3F(u_k0, h);
+            HMM_Vec3 c1   = HMM_MulV3F(u_k1, h);
 
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ ctr, cell->center, col, 1.0f };
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c0,  u_k0,         col, 1.0f };
@@ -368,45 +391,50 @@ static sg_buffer build_planet_goldberg_vbuf(const planet_full_config_t *p, const
         }
     }
 
-    /* Pass 2 — cliff walls. For each cell edge, the higher cell
-     * drops a quad of two triangles down to the lower cell's
-     * radius. Drawing only when the current cell is *higher* (smaller
-     * drop) ensures every shared edge contributes exactly one wall.
-     *
-     * The wall's outward normal is roughly the edge-midpoint
-     * direction (unit-sphere perpendicular to the radial axis at
-     * the edge), so Lambert on the wall lights up when the sun
-     * faces the cliff. Wall colour matches the higher cell's biome
-     * — a future commit can give exposed-rock cliffs their own tint. */
+    /* Pass 2 — cliff walls. Match upstream's wall emission:
+     *   - wall to water from land drops to seabed
+     *   - wall double-sided (front + back triangles)
+     *   - lower cell skips (only higher emits) */
     for (int c = 0; c < s_goldberg_cell_count; c++) {
         const goldberg_cell_t *cell = &s_goldberg_cells[c];
-        float drop_me = cell_drop[c];
-
-        int      biome  = cell_biome[c];
-        HMM_Vec3 col_me = (p->level_count > 0 && biome < p->level_count)
-            ? p->levels[biome].color
+        int      level   = cell_level[c];
+        HMM_Vec3 col_me  = (p->level_count > 0 && level < p->level_count)
+            ? p->levels[level].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
-        float    r_top  = 1.0f - drop_me;
+
+        float my_top = (level == 0) ? SEABED_H : LEVEL_H(level);
 
         for (int k = 0; k < cell->corner_count; k++) {
             int n = cell->neighbors[k];
             if (n < 0 || n >= s_goldberg_cell_count) continue;
-            float drop_n = cell_drop[n];
-            if (drop_me >= drop_n) continue;     /* not the higher cell */
-            float r_bot = 1.0f - drop_n;
+            int n_level = cell_level[n];
+
+            /* Wall-to-water-from-land special case (upstream:
+             *   nh = (level != 0 && nLevel == 0) ? Radius : LevelH(nLevel) ) */
+            float n_top;
+            if (level != 0 && n_level == 0) {
+                n_top = SEABED_H;
+            } else {
+                n_top = (n_level == 0) ? SEABED_H : LEVEL_H(n_level);
+            }
+
+            /* Suppression: skip if I'm not strictly higher. */
+            if (my_top <= n_top + 1e-5f) continue;
 
             HMM_Vec3 u_a = cell->corners[k];
             HMM_Vec3 u_b = cell->corners[(k + 1) % cell->corner_count];
 
-            HMM_Vec3 top_a = HMM_MulV3F(u_a, r_top);
-            HMM_Vec3 top_b = HMM_MulV3F(u_b, r_top);
-            HMM_Vec3 bot_a = HMM_MulV3F(u_a, r_bot);
-            HMM_Vec3 bot_b = HMM_MulV3F(u_b, r_bot);
+            HMM_Vec3 top_a = HMM_MulV3F(u_a, my_top);
+            HMM_Vec3 top_b = HMM_MulV3F(u_b, my_top);
+            HMM_Vec3 bot_a = HMM_MulV3F(u_a, n_top);
+            HMM_Vec3 bot_b = HMM_MulV3F(u_b, n_top);
 
             HMM_Vec3 wall_n = HMM_NormV3(HMM_AddV3(u_a, u_b));
 
-            /* Two triangles, CCW from outside the wall. The
-             * cross-product analysis is in the commit message. */
+            /* Double-sided: front winding + back winding so the wall
+             * renders correctly from either face. Matches upstream's
+             * two-sided wall winding (4 indices × 2 sides = 12). */
+            /* Front: top_a → top_b → bot_b, top_a → bot_b → bot_a */
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, wall_n, col_me, 1.0f };
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_b, wall_n, col_me, 1.0f };
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, wall_n, col_me, 1.0f };
@@ -415,7 +443,18 @@ static sg_buffer build_planet_goldberg_vbuf(const planet_full_config_t *p, const
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, wall_n, col_me, 1.0f };
             s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_a, wall_n, col_me, 1.0f };
 
-            if (v_out + 6 > BIOME_VBUF_MAX) {
+            /* Back winding (verts go opposite order so face culled-
+             * away triangles still show up from the inside): */
+            HMM_Vec3 nback = HMM_MulV3F(wall_n, -1.0f);
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_b, nback, col_me, 1.0f };
+
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_a, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, nback, col_me, 1.0f };
+
+            if (v_out + 12 > BIOME_VBUF_MAX) {
                 LOG_ERROR("solarsystem: biome scratch overflow on planet %s", p->name);
                 goto done;
             }
@@ -429,6 +468,8 @@ done:
                    .size = (size_t)v_out * sizeof(sphere_full_vertex_t) },
         .label = label,
     });
+
+    #undef LEVEL_H
 }
 
 /* ---- starfield ---- */
@@ -606,15 +647,16 @@ static void build_bodies(void)
                 b->draw_count = state.index_count;
             }
 
-            /* Water shell — only for ocean planets. Sea-level radius
-             * sits at level-1 (the lowest *land* biome): drop one
-             * step from the top biome × (level_count - 2). */
+            /* Water shell — only for ocean planets. Sits at upstream's
+             * LevelH(0) = R + 0.75 * StepHeight (the water surface,
+             * which is above the seabed at R = unit-sphere radius 1.0
+             * but below the level-1 sand cells at 1.0 + 1*step_unit). */
             if (biome_path && full->ocean_level0 && full->has_water
                 && full->radius > 0.0f && full->step_height > 0.0f
                 && full->level_count >= 2)
             {
                 float step_unit       = full->step_height / full->radius;
-                float sea_level_unit  = 1.0f - step_unit * (float)(full->level_count - 2);
+                float sea_level_unit  = 1.0f + 0.75f * step_unit;
                 b->water_vbuf = build_water_vbuf(full->water_color, sea_level_unit,
                                                  pl->self.name);
                 b->has_water  = true;
@@ -675,10 +717,22 @@ static void build_bodies(void)
                     lo_alpha = 0.35f; hi_alpha = 0.20f;
                     lo_thresh = 0.60f; hi_thresh = 0.65f;
                 }
-                b->cloud_vbuf[0]   = build_cloud_vbuf(1.05f, "clouds-low");
+                /* Cloud altitudes sit just above the highest biome
+                 * peak so they don't clip into snow caps. With
+                 * upstream's absolute LevelH heights the planet
+                 * surface goes up to 1.0 + max_level * step_unit;
+                 * clouds float a bit above that. */
+                float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
+                    ? (full->step_height / full->radius) : 0.04f;
+                int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
+                float biome_top  = 1.0f + (float)c_max * c_step;
+                float cloud_lo_r = biome_top + 0.5f * c_step;
+                float cloud_hi_r = biome_top + 2.0f * c_step;
+
+                b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
                 b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 4.0f } };
-                b->cloud_vbuf[1]   = build_cloud_vbuf(1.09f, "clouds-high");
+                b->cloud_vbuf[1]   = build_cloud_vbuf(cloud_hi_r, "clouds-high");
                 b->cloud_color[1]  = (HMM_Vec4){ .Elements = { hi_color.X, hi_color.Y, hi_color.Z, hi_alpha } };
                 b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 3.0f } };
                 b->cloud_layers    = 2;

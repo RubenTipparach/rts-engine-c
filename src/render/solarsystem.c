@@ -7,6 +7,7 @@
 #include "gen/solarsystem.glsl.h"
 #include "gen/orbit.glsl.h"
 #include "gen/atmosphere.glsl.h"
+#include "gen/clouds.glsl.h"
 #include "gen/starfield.glsl.h"
 
 #include <math.h>
@@ -78,6 +79,13 @@ typedef struct {
     bool        has_atmosphere;
     float       atmo_outer_mul;
     float       atmo_sun_intensity;
+    /* Cloud shells — up to two layers per planet. Each layer has a
+     * vbuf at its own radius and per-layer scale / threshold / drift /
+     * alpha so the C side can vary thickness + speed across layers. */
+    sg_buffer   cloud_vbuf[2];
+    HMM_Vec4    cloud_color[2];     /* rgb + alpha */
+    HMM_Vec4    cloud_params[2];    /* drift, scale, threshold, bump */
+    int         cloud_layers;
     HMM_Vec3    base_color;          /* for log + future use */
     float       radius;              /* world-space draw radius */
     float       orbit_radius;
@@ -121,6 +129,12 @@ static struct {
      * of the terrain mesh. */
     sg_shader    atmo_shd;
     sg_pipeline  atmo_pip;
+
+    /* Cloud shells — same fbm/bump shader for every planet's cloud
+     * layers, one pipeline shared across all of them. Per-body
+     * vbuf + uniforms vary per layer. */
+    sg_shader    cloud_shd;
+    sg_pipeline  cloud_pip;
 
     /* Starfield — POINTS primitive, 1px stars at infinity. Drawn first
      * each frame against an identity-translated view matrix so the
@@ -179,6 +193,24 @@ static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *l
         s_full_scratch[i].normal     = s_unit_verts[i].normal;
         s_full_scratch[i].color      = color;
         s_full_scratch[i].brightness = brightness;
+    }
+    return sg_make_buffer(&(sg_buffer_desc){
+        .data = { .ptr = s_full_scratch,
+                  .size = (size_t)s_unit_v_count * sizeof(sphere_full_vertex_t) },
+        .label = label,
+    });
+}
+
+/* Cloud shell — same simple sphere geometry, scaled outward to a
+ * per-layer altitude (slightly above terrain, well below atmosphere).
+ * Only aPos is read by clouds.glsl; the other fields stay zero. */
+static sg_buffer build_cloud_vbuf(float radius_mul, const char *label)
+{
+    for (int i = 0; i < s_unit_v_count; i++) {
+        s_full_scratch[i].pos        = HMM_MulV3F(s_unit_verts[i].pos, radius_mul);
+        s_full_scratch[i].normal     = s_unit_verts[i].normal;
+        s_full_scratch[i].color      = (HMM_Vec3){ .Elements = { 0, 0, 0 } };
+        s_full_scratch[i].brightness = 0.0f;
     }
     return sg_make_buffer(&(sg_buffer_desc){
         .data = { .ptr = s_full_scratch,
@@ -515,6 +547,24 @@ static void build_bodies(void)
                     ? full->atmosphere_sun_intensity : 30.0f;
                 b->has_atmosphere     = true;
             }
+
+            /* Cloud layers — enabled for any planet with both water
+             * AND atmosphere (a cheap proxy for "wet, breathable"
+             * worlds). Two layers per planet: a denser low layer at
+             * ~ planet+5% radius, a wispier high layer at +9%. The
+             * shader's `params` is (drift_time, scale, threshold,
+             * bump_strength); cloud_color is rgb + max alpha. The
+             * drift_time vec is updated per-frame from sim_time,
+             * the rest is static per-planet. */
+            if (biome_path && full->has_water && full->has_atmosphere) {
+                b->cloud_vbuf[0]   = build_cloud_vbuf(1.05f, "clouds-low");
+                b->cloud_color[0]  = (HMM_Vec4){ .Elements = { 1.00f, 1.00f, 1.00f, 0.85f } };
+                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, 0.50f, 4.0f } };
+                b->cloud_vbuf[1]   = build_cloud_vbuf(1.09f, "clouds-high");
+                b->cloud_color[1]  = (HMM_Vec4){ .Elements = { 1.00f, 1.00f, 1.00f, 0.40f } };
+                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, 0.55f, 3.0f } };
+                b->cloud_layers    = 2;
+            }
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
             const body_config_t *m = &pl->moons[j];
@@ -605,6 +655,36 @@ static void build_pipelines(void)
          * each other. */
         .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "starfield-pipeline",
+    });
+
+    state.cloud_shd = sg_make_shader(clouds_clouds_shader_desc(backend));
+    state.cloud_pip = sg_make_pipeline(&(sg_pipeline_desc){
+        .shader = state.cloud_shd,
+        .layout = {
+            .buffers[0] = { .stride = sizeof(sphere_full_vertex_t) },
+            .attrs = {
+                [ATTR_clouds_clouds_aPos] = {
+                    .offset = offsetof(sphere_full_vertex_t, pos),
+                    .format = SG_VERTEXFORMAT_FLOAT3,
+                },
+            },
+        },
+        .index_type   = SG_INDEXTYPE_UINT16,
+        /* Standard back-cull on the cloud shell (we view its outside).
+         * Alpha-blended over terrain + water; depth-test on, depth-
+         * write off so the second layer can composite over the
+         * first without z-fighting. */
+        .cull_mode    = SG_CULLMODE_BACK,
+        .face_winding = SG_FACEWINDING_CCW,
+        .colors[0].blend = {
+            .enabled          = true,
+            .src_factor_rgb   = SG_BLENDFACTOR_SRC_ALPHA,
+            .dst_factor_rgb   = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+            .src_factor_alpha = SG_BLENDFACTOR_ONE,
+            .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+        },
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        .label = "clouds-pipeline",
     });
 
     state.atmo_shd = sg_make_shader(atmosphere_atmosphere_shader_desc(backend));
@@ -808,6 +888,55 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
             });
             sg_apply_uniforms(UB_solarsystem_ss_vs_params, &(sg_range){ &vsp, sizeof(vsp) });
             sg_apply_uniforms(UB_solarsystem_ss_fs_params, &(sg_range){ &fsp, sizeof(fsp) });
+            sg_draw(0, state.index_count, 1);
+        }
+    }
+
+    /* Cloud pass — fbm shells per cloudy planet, between the opaque
+     * terrain/water and the atmosphere shell so atmosphere haze
+     * composites *over* the cloud tops. Two layers per planet, drawn
+     * inner→outer so the higher layer alpha-blends over the lower. */
+    sg_apply_pipeline(state.cloud_pip);
+    for (int i = 1; i < state.body_count; i++) {
+        const body_entry_t *b = &state.bodies[i];
+        if (b->cloud_layers <= 0) continue;
+
+        HMM_Vec3 wp     = world_pos[i];
+        HMM_Mat4 model  = HMM_MulM4(
+            HMM_Translate(wp),
+            HMM_Scale((HMM_Vec3){ .Elements = { b->radius, b->radius, b->radius } }));
+        HMM_Mat4 mvp    = HMM_MulM4(view_proj, model);
+        HMM_Vec3 sun_local = HMM_NormV3(HMM_MulV3F(wp, -1.0f));
+
+        for (int layer = 0; layer < b->cloud_layers; layer++) {
+            float drift_speed = b->cloud_params[layer].X;
+            float drift_time  = (float)state.sim_time * drift_speed;
+
+            clouds_cloud_vs_params_t cvsp;
+            memcpy(cvsp.mvp, &mvp, sizeof(mvp));
+            clouds_cloud_fs_params_t cfsp = {
+                .sunDir = { sun_local.X, sun_local.Y, sun_local.Z, 0.0f },
+                /* Pack: (drift_time, noise_scale, threshold, bump). The
+                 * X slot is the time the shader actually samples, with
+                 * the per-layer drift speed already applied. */
+                .params = {
+                    drift_time,
+                    b->cloud_params[layer].Y,
+                    b->cloud_params[layer].Z,
+                    b->cloud_params[layer].W,
+                },
+                .color  = {
+                    b->cloud_color[layer].X, b->cloud_color[layer].Y,
+                    b->cloud_color[layer].Z, b->cloud_color[layer].W,
+                },
+            };
+
+            sg_apply_bindings(&(sg_bindings){
+                .vertex_buffers[0] = b->cloud_vbuf[layer],
+                .index_buffer      = state.ibuf,
+            });
+            sg_apply_uniforms(UB_clouds_cloud_vs_params, &(sg_range){ &cvsp, sizeof(cvsp) });
+            sg_apply_uniforms(UB_clouds_cloud_fs_params, &(sg_range){ &cfsp, sizeof(cfsp) });
             sg_draw(0, state.index_count, 1);
         }
     }
@@ -1026,11 +1155,13 @@ void solarsystem_shutdown(void)
     sg_destroy_pipeline(state.orbit_pip);
     sg_destroy_pipeline(state.ss_pip);
     sg_destroy_pipeline(state.atmo_pip);
+    sg_destroy_pipeline(state.cloud_pip);
     sg_destroy_pipeline(state.sun_pip);
     sg_destroy_pipeline(state.starfield_pip);
     sg_destroy_shader(state.orbit_shd);
     sg_destroy_shader(state.ss_shd);
     sg_destroy_shader(state.atmo_shd);
+    sg_destroy_shader(state.cloud_shd);
     sg_destroy_shader(state.sun_shd);
     sg_destroy_shader(state.starfield_shd);
     sg_destroy_buffer(state.starfield_vbuf);
@@ -1038,6 +1169,9 @@ void solarsystem_shutdown(void)
         sg_destroy_buffer(state.bodies[i].vbuf);
         if (state.bodies[i].has_water)      sg_destroy_buffer(state.bodies[i].water_vbuf);
         if (state.bodies[i].has_atmosphere) sg_destroy_buffer(state.bodies[i].atmo_vbuf);
+        for (int c = 0; c < state.bodies[i].cloud_layers; c++) {
+            sg_destroy_buffer(state.bodies[i].cloud_vbuf[c]);
+        }
     }
     sg_destroy_buffer(state.orbit_vbuf);
     sg_destroy_buffer(state.ibuf_biome);

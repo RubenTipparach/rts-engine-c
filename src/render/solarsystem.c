@@ -71,13 +71,13 @@ typedef struct {
      * but below land cells. */
     sg_buffer   water_vbuf;
     bool        has_water;
-    /* Optional atmosphere shell (outer sphere at planet_radius *
-     * outerRadiusMul). Drawn after water; alpha-blended pixel-art
-     * rim glow. */
+    /* Atmosphere shell (shader expects body-local space — see
+     * atmosphere.glsl). atmo_outer_mul is the shell's radius in
+     * those units; atmo_sun_intensity is the YAML's sunIntensity. */
     sg_buffer   atmo_vbuf;
     bool        has_atmosphere;
-    HMM_Vec4    atmo_tint;       /* rgb = colour, a = max alpha */
-    float       atmo_outer_mul;  /* 1.0 means shell == terrain */
+    float       atmo_outer_mul;
+    float       atmo_sun_intensity;
     HMM_Vec3    base_color;          /* for log + future use */
     float       radius;              /* world-space draw radius */
     float       orbit_radius;
@@ -504,20 +504,16 @@ static void build_bodies(void)
             }
 
             /* Atmosphere shell — any planet with an atmosphere section.
-             * The pixel-art shader only needs an outer radius and a
-             * tint colour; we synthesise the tint from the planet's
-             * water colour (cool blue) when present, or a soft cyan
-             * fallback otherwise. */
+             * The Nishita shader picks colour from Rayleigh
+             * wavelengths × sunIntensity, so we just plumb the YAML
+             * knobs through. Sun intensity falls back to upstream's
+             * 30.0 default if the YAML omits it. */
             if (biome_path && full->has_atmosphere && full->atmosphere_outer_mul > 1.0f) {
-                b->atmo_vbuf = build_atmosphere_vbuf(full->atmosphere_outer_mul, pl->self.name);
-                HMM_Vec3 tint_rgb = full->has_water
-                    ? full->water_color
-                    : (HMM_Vec3){ .Elements = { 0.55f, 0.75f, 1.0f } };
-                b->atmo_tint        = (HMM_Vec4){
-                    .Elements = { tint_rgb.X, tint_rgb.Y, tint_rgb.Z, 0.85f }
-                };
-                b->atmo_outer_mul   = full->atmosphere_outer_mul;
-                b->has_atmosphere   = true;
+                b->atmo_vbuf          = build_atmosphere_vbuf(full->atmosphere_outer_mul, pl->self.name);
+                b->atmo_outer_mul     = full->atmosphere_outer_mul;
+                b->atmo_sun_intensity = (full->atmosphere_sun_intensity > 0.0f)
+                    ? full->atmosphere_sun_intensity : 30.0f;
+                b->has_atmosphere     = true;
             }
         }
         for (int j = 0; j < pl->moon_count && state.body_count < MAX_BODIES; j++) {
@@ -816,35 +812,40 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         }
     }
 
-    /* Atmosphere pass — alpha-blended shell rendered after every
-     * opaque planet+water but before the orbit rings, so the rim
-     * glow composites against the dark sky and the rings overlay it.
-     * Each planet that loaded an atmosphere section gets its own
-     * shell vbuf scaled to atmo_outer_mul; uniforms come from the
-     * planet's current world position + the camera direction. */
+    /* Atmosphere pass — Nishita single-scatter on a back-rendered
+     * shell. Drawn after every opaque planet + water but before the
+     * orbit rings; the shader does its own ray-march in body-local
+     * space, so we pass camera + sun in that frame and let the GPU
+     * integrate per-fragment. */
     sg_apply_pipeline(state.atmo_pip);
     for (int i = 1; i < state.body_count; i++) {
         const body_entry_t *b = &state.bodies[i];
         if (!b->has_atmosphere) continue;
 
-        HMM_Vec3 wp     = world_pos[i];
-        HMM_Mat4 model  = HMM_MulM4(
+        HMM_Vec3 wp    = world_pos[i];
+        HMM_Mat4 model = HMM_MulM4(
             HMM_Translate(wp),
             HMM_Scale((HMM_Vec3){ .Elements = { b->radius, b->radius, b->radius } }));
-        HMM_Mat4 mvp    = HMM_MulM4(view_proj, model);
+        HMM_Mat4 mvp   = HMM_MulM4(view_proj, model);
 
-        /* Single-direction view approximation — for a thin shell at
-         * solar-system distances, per-fragment view variation is
-         * negligible. Sun direction at body = body_pos (sun at
-         * origin), shader normalises. */
-        HMM_Vec3 view_to_body = HMM_NormV3(HMM_SubV3(wp, cam_pos));
+        /* Body-local space: model is translate(wp) * scale(radius), so
+         *   inverse(model) = scale(1/radius) * translate(-wp)
+         * which puts the planet centre at the origin and the surface
+         * at radius 1.0. The atmosphere shell sits at atmo_outer_mul. */
+        float    inv_r        = (b->radius > 0.0f) ? (1.0f / b->radius) : 1.0f;
+        HMM_Vec3 cam_local    = HMM_MulV3F(HMM_SubV3(cam_pos, wp), inv_r);
+        /* Sun is at world origin; body is at wp. Direction from a
+         * point near the body toward the sun = -wp / |wp|. The same
+         * vector in body-local space (no rotation in the model
+         * matrix) — direction normalises away the scale. */
+        HMM_Vec3 sun_local    = HMM_NormV3(HMM_MulV3F(wp, -1.0f));
 
         atmosphere_atmo_vs_params_t avsp;
         memcpy(avsp.mvp, &mvp, sizeof(mvp));
         atmosphere_atmo_fs_params_t afsp = {
-            .viewDir = { view_to_body.X, view_to_body.Y, view_to_body.Z, 0.0f },
-            .sunDir  = { wp.X,           wp.Y,           wp.Z,           0.0f },
-            .tint    = { b->atmo_tint.X, b->atmo_tint.Y, b->atmo_tint.Z, b->atmo_tint.W },
+            .sunDir    = { sun_local.X, sun_local.Y, sun_local.Z, 0.0f },
+            .cameraPos = { cam_local.X, cam_local.Y, cam_local.Z, 0.0f },
+            .params    = { 1.0f, b->atmo_outer_mul, b->atmo_sun_intensity, 0.0f },
         };
 
         sg_apply_bindings(&(sg_bindings){

@@ -52,10 +52,12 @@ typedef struct {
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
 
-/* Goldberg subdiv 3 → 642 cells → ~11520 fan-triangulated verts.
- * Scratch sized to a comfortable upper bound so a future bump to
- * subdiv 4 (2562 cells → ~46k verts) just needs a buffer change. */
-#define BIOME_VBUF_MAX      16384
+/* Goldberg subdiv 3 → 642 cells → ~11520 fan-triangulated verts for
+ * the cell tops, plus up to ~11556 more for the cliff walls between
+ * cells of different biomes (every edge counted once). Sized to
+ * 32768 to give comfortable headroom; bump again for subdiv 4 if
+ * we ever ship that. */
+#define BIOME_VBUF_MAX      32768
 
 typedef struct {
     HMM_Vec3 pos;        /* 0  */
@@ -323,39 +325,105 @@ static sg_buffer build_planet_goldberg_vbuf(const planet_full_config_t *p, const
 {
     int v_out     = 0;
     int max_level = (p->level_count > 0) ? (p->level_count - 1) : 0;
-    /* If radius is zero (shouldn't happen but be defensive) skip the
-     * height step so we still draw a colour-only sphere instead of
-     * collapsing to the origin. */
     float step_unit = (p->radius > 0.0f && p->step_height > 0.0f)
         ? (p->step_height / p->radius) : 0.0f;
 
+    /* Pre-pass: classify every cell into its biome + remember the
+     * radial drop so the wall pass below can compare across edges
+     * without re-sampling noise. */
+    static int   cell_biome[GOLDBERG_MAX_CELLS];
+    static float cell_drop[GOLDBERG_MAX_CELLS];
+    for (int c = 0; c < s_goldberg_cell_count; c++) {
+        int b          = planet_biome_index(s_goldberg_cells[c].center, p);
+        cell_biome[c]  = b;
+        cell_drop[c]   = step_unit * (float)(max_level - b);
+    }
+
+    /* Pass 1 — cell tops. Each cell fan-triangulates from its centre
+     * out to consecutive corner pairs, all displaced inward by the
+     * cell's biome drop. Normals stay radial (the unit-sphere
+     * direction) so Lambert lighting on the cell top reads as if
+     * the cell were tangent to the sphere. */
     for (int c = 0; c < s_goldberg_cell_count; c++) {
         const goldberg_cell_t *cell = &s_goldberg_cells[c];
 
-        int      biome = planet_biome_index(cell->center, p);
+        int      biome = cell_biome[c];
         HMM_Vec3 col   = (p->level_count > 0 && biome < p->level_count)
             ? p->levels[biome].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
 
-        float    drop = step_unit * (float)(max_level - biome);
+        float    drop = cell_drop[c];
         float    r    = 1.0f - drop;
         HMM_Vec3 ctr  = HMM_MulV3F(cell->center, r);
 
         for (int k = 0; k < cell->corner_count; k++) {
-            HMM_Vec3 c0 = HMM_MulV3F(cell->corners[k], r);
-            HMM_Vec3 c1 = HMM_MulV3F(cell->corners[(k + 1) % cell->corner_count], r);
+            HMM_Vec3 u_k0 = cell->corners[k];
+            HMM_Vec3 u_k1 = cell->corners[(k + 1) % cell->corner_count];
+            HMM_Vec3 c0   = HMM_MulV3F(u_k0, r);
+            HMM_Vec3 c1   = HMM_MulV3F(u_k1, r);
 
-            /* Normals stay radial (= the unit-sphere direction) so
-             * Lambert reads correctly across the cell top even after
-             * the inward radial push. */
-            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ ctr, cell->center,                                  col, 1.0f };
-            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c0,  cell->corners[k],                              col, 1.0f };
-            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c1,  cell->corners[(k + 1) % cell->corner_count],   col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ ctr, cell->center, col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c0,  u_k0,         col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c1,  u_k1,         col, 1.0f };
         }
     }
 
-    if (out_index_count) *out_index_count = v_out;
+    /* Pass 2 — cliff walls. For each cell edge, the higher cell
+     * drops a quad of two triangles down to the lower cell's
+     * radius. Drawing only when the current cell is *higher* (smaller
+     * drop) ensures every shared edge contributes exactly one wall.
+     *
+     * The wall's outward normal is roughly the edge-midpoint
+     * direction (unit-sphere perpendicular to the radial axis at
+     * the edge), so Lambert on the wall lights up when the sun
+     * faces the cliff. Wall colour matches the higher cell's biome
+     * — a future commit can give exposed-rock cliffs their own tint. */
+    for (int c = 0; c < s_goldberg_cell_count; c++) {
+        const goldberg_cell_t *cell = &s_goldberg_cells[c];
+        float drop_me = cell_drop[c];
 
+        int      biome  = cell_biome[c];
+        HMM_Vec3 col_me = (p->level_count > 0 && biome < p->level_count)
+            ? p->levels[biome].color
+            : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
+        float    r_top  = 1.0f - drop_me;
+
+        for (int k = 0; k < cell->corner_count; k++) {
+            int n = cell->neighbors[k];
+            if (n < 0 || n >= s_goldberg_cell_count) continue;
+            float drop_n = cell_drop[n];
+            if (drop_me >= drop_n) continue;     /* not the higher cell */
+            float r_bot = 1.0f - drop_n;
+
+            HMM_Vec3 u_a = cell->corners[k];
+            HMM_Vec3 u_b = cell->corners[(k + 1) % cell->corner_count];
+
+            HMM_Vec3 top_a = HMM_MulV3F(u_a, r_top);
+            HMM_Vec3 top_b = HMM_MulV3F(u_b, r_top);
+            HMM_Vec3 bot_a = HMM_MulV3F(u_a, r_bot);
+            HMM_Vec3 bot_b = HMM_MulV3F(u_b, r_bot);
+
+            HMM_Vec3 wall_n = HMM_NormV3(HMM_AddV3(u_a, u_b));
+
+            /* Two triangles, CCW from outside the wall. The
+             * cross-product analysis is in the commit message. */
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_b, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, wall_n, col_me, 1.0f };
+
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_a, wall_n, col_me, 1.0f };
+
+            if (v_out + 6 > BIOME_VBUF_MAX) {
+                LOG_ERROR("solarsystem: biome scratch overflow on planet %s", p->name);
+                goto done;
+            }
+        }
+    }
+
+done:
+    if (out_index_count) *out_index_count = v_out;
     return sg_make_buffer(&(sg_buffer_desc){
         .data  = { .ptr = s_biome_scratch,
                    .size = (size_t)v_out * sizeof(sphere_full_vertex_t) },
@@ -446,24 +514,19 @@ static void build_geometry(void)
         s_goldberg_cell_count = 0;
     }
 
-    /* Compute the goldberg biome vert count up front (every planet
-     * uses the same cell layout, so the count is fixed): 5 fan-tris
-     * per pentagon and 6 per hexagon, 3 verts per tri. */
-    s_biome_index_count = 0;
-    for (int i = 0; i < s_goldberg_cell_count; i++) {
-        s_biome_index_count += s_goldberg_cells[i].corner_count * 3;
-    }
-
-    /* Sequential ibuf for the cell-stepped biome path. */
-    for (int i = 0; i < s_biome_index_count && i < BIOME_VBUF_MAX; i++) {
+    /* Sequential ibuf sized for the worst-case biome vbuf (cell tops
+     * + cliff walls). Each planet's actual draw_count is whatever
+     * its biome bake produced, always <= BIOME_VBUF_MAX. */
+    for (int i = 0; i < BIOME_VBUF_MAX; i++) {
         s_biome_indices[i] = (uint16_t)i;
     }
     state.ibuf_biome = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .index_buffer = true },
         .data  = { .ptr = s_biome_indices,
-                   .size = (size_t)s_biome_index_count * sizeof(uint16_t) },
+                   .size = (size_t)BIOME_VBUF_MAX * sizeof(uint16_t) },
         .label = "sphere-biome-ibuf",
     });
+    s_biome_index_count = BIOME_VBUF_MAX;
 
     /* Unit-radius circle in the xz plane, line-strip with the first
      * vertex repeated at the end so we get a closed loop. Segment

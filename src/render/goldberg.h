@@ -28,6 +28,11 @@
 typedef struct {
     HMM_Vec3 center;                          /* unit-sphere */
     HMM_Vec3 corners[GOLDBERG_CORNERS_MAX];
+    /* Cell ID adjacent across edge `i` — the edge runs between
+     * corners[i] and corners[(i+1) % corner_count]. Used by the
+     * wall geometry: cells of different heights share an edge,
+     * and the higher cell drops a quad down to the lower. */
+    int      neighbors[GOLDBERG_CORNERS_MAX];
     int      corner_count;                    /* 5 (pentagon) or 6 (hexagon) */
 } goldberg_cell_t;
 

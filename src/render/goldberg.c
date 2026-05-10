@@ -219,6 +219,25 @@ bool goldberg_make(int subdiv,
         for (int i = 0; i < adj_count[v]; i++) {
             cell->corners[i] = centroids[order[i]];
         }
+
+        /* Neighbours: each edge of the cell runs between
+         * corners[i] and corners[(i+1) % N]. Those corners are the
+         * centroids of two ico triangles incident to vertex v. The
+         * cell-graph neighbour across that edge is the *other*
+         * vertex shared by those two triangles. */
+        for (int i = 0; i < adj_count[v]; i++) {
+            int t1 = adj[v][order[i]];
+            int t2 = adj[v][order[(i + 1) % adj_count[v]]];
+            int neighbour = -1;
+            for (int k = 0; k < 3 && neighbour < 0; k++) {
+                int vk = g_tris[t1][k];
+                if (vk == v) continue;
+                for (int j = 0; j < 3; j++) {
+                    if (g_tris[t2][j] == vk) { neighbour = vk; break; }
+                }
+            }
+            cell->neighbors[i] = neighbour;
+        }
     }
 
     return true;

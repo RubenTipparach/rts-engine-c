@@ -155,6 +155,11 @@ static struct {
     HMM_Vec3     from_focus;
     float        from_distance;
     float        to_distance;
+
+    /* HUD diagnostic — number of cloud draw calls dispatched in the
+     * last frame. Lets the HUD show whether the cloud pass is even
+     * reaching its draw site. */
+    int          cloud_draws_last_frame;
 } state;
 
 static HMM_Vec3 body_world_pos(const body_entry_t *b, double t);
@@ -679,24 +684,22 @@ static void build_bodies(void)
                     lo_alpha = 0.55f; hi_alpha = 0.30f;
                     lo_thresh = 0.45f; hi_thresh = 0.50f;
                 }
-                /* Cloud altitudes sit just above the highest biome
-                 * peak so they don't clip into snow caps. With
-                 * upstream's absolute LevelH heights the planet
-                 * surface goes up to 1.0 + max_level * step_unit;
-                 * clouds float a bit above that. */
-                float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
-                    ? (full->step_height / full->radius) : 0.04f;
-                int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
-                float biome_top  = 1.0f + (float)c_max * c_step;
-                float cloud_lo_r = biome_top + 0.5f * c_step;
-                float cloud_hi_r = biome_top + 2.0f * c_step;
+                /* DEBUG: oversized cloud sphere so it CAN'T be confused
+                 * with the atmosphere or hidden by depth. Move back
+                 * to per-step altitudes once we see it. */
+                float cloud_lo_r = 1.30f;
+                float cloud_hi_r = 1.35f;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
-                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 4.0f } };
+                /* Per-layer params: (drift_speed, noise_scale, density_threshold, bump_strength).
+                 * bump_strength is intentionally small (0.5-1.0) — heavy
+                 * bump tilts the perturbed normal past horizontal and
+                 * Lambert collapses to ambient. */
+                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 0.8f } };
                 b->cloud_vbuf[1]   = build_cloud_vbuf(cloud_hi_r, "clouds-high");
                 b->cloud_color[1]  = (HMM_Vec4){ .Elements = { hi_color.X, hi_color.Y, hi_color.Z, hi_alpha } };
-                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 3.0f } };
+                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 0.5f } };
                 b->cloud_layers    = 2;
             }
         }
@@ -801,11 +804,12 @@ static void build_pipelines(void)
             },
         },
         .index_type   = SG_INDEXTYPE_UINT16,
-        /* Standard back-cull on the cloud shell (we view its outside).
-         * Alpha-blended over terrain + water; depth-test on, depth-
-         * write off so the second layer can composite over the
-         * first without z-fighting. */
-        .cull_mode    = SG_CULLMODE_BACK,
+        /* Standard back-cull on the cloud shell (view its outside).
+         * Depth test + write on — clouds participate in the depth
+         * buffer like opaque geometry; the shader does its own
+         * alpha-test discard so transparent fragments don't pollute
+         * the depth buffer. */
+        .cull_mode    = SG_CULLMODE_NONE,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,
@@ -814,7 +818,7 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 
@@ -889,6 +893,17 @@ void solarsystem_init(const solarsystem_config_t  *cfg,
     build_bodies();
     build_pipelines();
     state.inited = true;
+
+    /* Diagnostic: dump per-body cloud setup so we can confirm at a
+     * glance which bodies have cloud vbufs + layer counts. If the
+     * counts look right but clouds are still invisible, the bug is
+     * in pipeline state or draw dispatch, not in build_bodies. */
+    for (int i = 0; i < state.body_count; i++) {
+        const body_entry_t *b = &state.bodies[i];
+        LOG_INFO("body[%d] %-9s kind=%d radius=%.2f clouds=%d water=%d atmo=%d",
+                 i, b->name, (int)b->kind, b->radius,
+                 b->cloud_layers, (int)b->has_water, (int)b->has_atmosphere);
+    }
 }
 
 sg_pass_action solarsystem_pass_action(void)
@@ -1039,6 +1054,7 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
      * terrain/water and the atmosphere shell so atmosphere haze
      * composites *over* the cloud tops. Two layers per planet, drawn
      * inner→outer so the higher layer alpha-blends over the lower. */
+    state.cloud_draws_last_frame = 0;
     sg_apply_pipeline(state.cloud_pip);
     for (int i = 1; i < state.body_count; i++) {
         const body_entry_t *b = &state.bodies[i];
@@ -1081,6 +1097,7 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
             sg_apply_uniforms(UB_clouds_cloud_vs_params, &(sg_range){ &cvsp, sizeof(cvsp) });
             sg_apply_uniforms(UB_clouds_cloud_fs_params, &(sg_range){ &cfsp, sizeof(cfsp) });
             sg_draw(0, state.index_count, 1);
+            state.cloud_draws_last_frame++;
         }
     }
 
@@ -1290,6 +1307,11 @@ const char *solarsystem_active_body_name(void)
 bool solarsystem_is_transitioning(void)
 {
     return state.transitioning;
+}
+
+int solarsystem_cloud_draws_last_frame(void)
+{
+    return state.cloud_draws_last_frame;
 }
 
 void solarsystem_shutdown(void)

@@ -49,4 +49,10 @@ const char *   solarsystem_active_body_name(void);
 /* True while a click-zoom transition is animating, for debug HUD. */
 bool           solarsystem_is_transitioning(void);
 
+/* Number of cloud draw calls dispatched in the most recent frame.
+ * Zero means the per-body loop never reached its cloud branch — a
+ * structural / build-side issue. Non-zero means draws are dispatched
+ * and any invisibility is GPU-side. */
+int            solarsystem_cloud_draws_last_frame(void);
+
 void           solarsystem_shutdown(void);

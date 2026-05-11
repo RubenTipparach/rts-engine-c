@@ -810,11 +810,14 @@ static void build_pipelines(void)
             },
         },
         .index_type   = SG_INDEXTYPE_UINT16,
-        /* Standard back-cull on the cloud shell (view its outside).
-         * Depth test enabled, depth write OFF — clouds are
-         * transparent layers and shouldn't block subsequent draws.
-         * The shader's discard handles "no cloud here" pixels. */
-        .cull_mode    = SG_CULLMODE_BACK,
+        /* Both hemispheres of the cloud shell get rasterized. With
+         * back-cull we were somehow getting the *back* hemisphere
+         * only (clouds appeared as a halo at the limb, never over
+         * the terrain). cull=NONE side-steps any winding mismatch
+         * between the cloud vbuf's scaled vertices and the shared
+         * sphere ibuf. Depth test still keeps the cloud's far
+         * hemisphere out of the terrain silhouette. */
+        .cull_mode    = SG_CULLMODE_NONE,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,

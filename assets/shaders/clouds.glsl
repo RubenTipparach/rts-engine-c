@@ -60,19 +60,35 @@ float fbm3(vec3 p) {
 }
 
 void main() {
-    /* DEBUG — force all FS uniforms to be referenced (so sokol-shdc
-     * doesn't strip the block) but bypass the density/discard logic.
-     * If the cloud sphere appears as a Lambert-lit globe in the
-     * cloud's planet-specific tint, the pipeline + bindings + cull
-     * + depth are all fine and the bug was in the density math.
-     * If nothing appears, the issue is C-side dispatch. */
-    vec3  N        = normalize(vLocal);
-    vec3  L        = normalize(sunDir.xyz);
-    float NdotL    = max(dot(N, L), 0.0);
-    float lit      = 0.30 + 0.70 * NdotL;
-    /* Touch params + bumpAmt so the block isn't dead-stripped. */
-    float keep     = (params.x + params.y + params.z + params.w) * 1e-6;
-    FragColor = vec4(color.rgb * lit + vec3(keep), color.a);
+    float t      = params.x;
+    float scale  = params.y;
+    float thresh = params.z;
+
+    vec3 N    = normalize(vLocal);
+    vec3 base = N * scale + vec3(t, t * 0.6, t * -0.4);
+
+    /* Density via fbm + smooth threshold. The alpha-test below
+     * `discard`s sub-threshold fragments so they don't write into
+     * the depth buffer — required because the pipeline now has
+     * depth_write_enabled = true. */
+    float d       = fbm3(base);
+    float density = smoothstep(thresh, thresh + 0.15, d);
+
+    /* Alpha-test: drop empty cloud cells. Anything below this is
+     * effectively transparent — let the layer beneath show through
+     * and don't pollute depth. */
+    if (density < 0.05) discard;
+
+    /* Lambert against the sun direction (no bump for clarity). */
+    vec3  L     = normalize(sunDir.xyz);
+    float NdotL = max(dot(N, L), 0.0);
+    float lit   = 0.40 + 0.60 * NdotL;
+
+    /* Day-side fade controls alpha only — no double attenuation. */
+    float day   = smoothstep(-0.25, 0.30, dot(N, L));
+    float alpha = density * color.a * day;
+
+    FragColor = vec4(color.rgb * lit, alpha);
 }
 @end
 

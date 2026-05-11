@@ -802,11 +802,12 @@ static void build_pipelines(void)
             },
         },
         .index_type   = SG_INDEXTYPE_UINT16,
-        /* DEBUG — most permissive cull + depth state to force clouds
-         * visible regardless of geometry occlusion. If clouds appear
-         * with NONE/ALWAYS we know the previous cull_BACK or depth-
-         * LESS_EQUAL was rejecting all fragments. */
-        .cull_mode    = SG_CULLMODE_NONE,
+        /* Standard back-cull on the cloud shell (view its outside).
+         * Depth test + write on — clouds participate in the depth
+         * buffer like opaque geometry; the shader does its own
+         * alpha-test discard so transparent fragments don't pollute
+         * the depth buffer. */
+        .cull_mode    = SG_CULLMODE_BACK,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,
@@ -815,7 +816,7 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = true },
         .label = "clouds-pipeline",
     });
 

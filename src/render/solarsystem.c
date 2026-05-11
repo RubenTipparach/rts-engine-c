@@ -40,15 +40,6 @@
  * runtime — clamped to [8, ORBIT_RING_MAX_SEGMENTS]. */
 #define ORBIT_RING_MAX_SEGMENTS 128
 
-/* 1500 stars is enough to read as a busy starfield at typical screen
- * sizes without overpainting the planets. All baked once at init. */
-#define STARFIELD_COUNT 1500
-
-typedef struct {
-    HMM_Vec3 pos;     /* unit-sphere direction (stars are at infinity) */
-    HMM_Vec3 color;   /* baked brightness + slight tint */
-} star_vertex_t;
-
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
 
@@ -474,54 +465,18 @@ done:
 
 /* ---- starfield ---- */
 
-/* Tiny LCG (numerical recipes constants) — deterministic seed-driven
- * random for reproducible star placement across runs/builds. */
-static uint32_t star_lcg_next(uint32_t *s)
-{
-    *s = *s * 1664525u + 1013904223u;
-    return *s;
-}
-static float star_lcg_unit(uint32_t *s) { return (float)(star_lcg_next(s) >> 8) / (float)(1u << 24); }
-
+/* Fullscreen triangle in NDC. The starfield shader uses aPos.xy as
+ * NDC coordinates directly (gl_Position = vec4(aPos.xy, 0.99999, 1))
+ * so the triangle just needs to cover the [-1,1] viewport — extend
+ * two corners beyond to avoid edge artifacts. Matches the upstream
+ * starfield.glsl's fullscreen-triangle convention. */
 static void build_starfield(void)
 {
-    static star_vertex_t verts[STARFIELD_COUNT];
-    uint32_t seed = 0xDEADBEEFu;
-
-    for (int i = 0; i < STARFIELD_COUNT; i++) {
-        /* Marsaglia method for a uniform random direction on the
-         * unit sphere — avoids the pole-clustering that you get
-         * from picking lat/long uniformly. */
-        float u, v, s2;
-        do {
-            u = star_lcg_unit(&seed) * 2.0f - 1.0f;
-            v = star_lcg_unit(&seed) * 2.0f - 1.0f;
-            s2 = u * u + v * v;
-        } while (s2 >= 1.0f || s2 == 0.0f);
-        float t = sqrtf(1.0f - s2);
-        verts[i].pos = (HMM_Vec3){ .Elements = { 2.0f * u * t, 2.0f * v * t, 1.0f - 2.0f * s2 } };
-
-        /* Quantised brightness — pixel-art star palettes typically
-         * have a handful of intensity steps rather than continuous
-         * fade. ~70% dim, 22% medium, 7% bright, 1% very bright. */
-        float r       = star_lcg_unit(&seed);
-        float bright;
-        if      (r < 0.70f) bright = 0.18f;
-        else if (r < 0.92f) bright = 0.40f;
-        else if (r < 0.99f) bright = 0.70f;
-        else                bright = 1.00f;
-
-        /* Slight per-star tint — most stars white, some warm, some
-         * cool. Variation is tiny so the field reads as "stars" not
-         * "confetti." */
-        float tint = star_lcg_unit(&seed);
-        HMM_Vec3 col;
-        if      (tint < 0.30f) col = (HMM_Vec3){ .Elements = { 1.00f, 0.92f, 0.78f } }; /* warm */
-        else if (tint < 0.55f) col = (HMM_Vec3){ .Elements = { 0.85f, 0.92f, 1.00f } }; /* cool */
-        else                   col = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } }; /* white */
-        verts[i].color = HMM_MulV3F(col, bright);
-    }
-
+    static const HMM_Vec3 verts[3] = {
+        { .Elements = { -1.0f, -1.0f, 0.0f } },
+        { .Elements = {  3.0f, -1.0f, 0.0f } },
+        { .Elements = { -1.0f,  3.0f, 0.0f } },
+    };
     state.starfield_vbuf = sg_make_buffer(&(sg_buffer_desc){
         .data  = { .ptr = verts, .size = sizeof(verts) },
         .label = "starfield-vbuf",
@@ -816,22 +771,19 @@ static void build_pipelines(void)
     state.starfield_pip = sg_make_pipeline(&(sg_pipeline_desc){
         .shader = state.starfield_shd,
         .layout = {
-            .buffers[0] = { .stride = sizeof(star_vertex_t) },
+            .buffers[0] = { .stride = sizeof(HMM_Vec3) },
             .attrs = {
                 [ATTR_starfield_starfield_aPos] = {
-                    .offset = offsetof(star_vertex_t, pos),
-                    .format = SG_VERTEXFORMAT_FLOAT3,
-                },
-                [ATTR_starfield_starfield_aColor] = {
-                    .offset = offsetof(star_vertex_t, color),
+                    .offset = 0,
                     .format = SG_VERTEXFORMAT_FLOAT3,
                 },
             },
         },
-        .primitive_type = SG_PRIMITIVETYPE_POINTS,
-        /* Stars sit at the far plane; disable depth-write so the
-         * solar system draws on top of them but stars don't fight
-         * each other. */
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLES,
+        /* Fullscreen triangle at z=0.99999 (just shy of the far
+         * plane) so the rest of the scene depth-tests over it.
+         * Depth compare ALWAYS / write off keeps the starfield
+         * out of the way of subsequent draws. */
         .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "starfield-pipeline",
     });
@@ -981,22 +933,32 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
     HMM_Vec3 world_pos[MAX_BODIES];
     resolve_world_positions(world_pos);
 
-    /* Starfield first — far behind everything else. View matrix has
-     * its translation zeroed so stars stay locked to the camera's
-     * orientation but never translate, giving the celestial-sphere
-     * illusion. Depth comparison is ALWAYS, so stars overwrite the
-     * clear color but don't fight against each other. */
+    /* Starfield first — fullscreen triangle that reconstructs the
+     * per-fragment ray direction from the camera basis (right/up/
+     * forward) + NDC. The upstream shader's voronoi-based stars and
+     * fbm nebula need the camera basis in world space and the
+     * field-of-view tan/aspect to compute view rays. */
     {
-        HMM_Mat4 view_no_trans       = view;
-        view_no_trans.Columns[3]     = (HMM_Vec4){ .Elements = { 0, 0, 0, 1 } };
-        HMM_Mat4 sky_mvp             = HMM_MulM4(proj, view_no_trans);
-        starfield_star_vs_params_t svsp;
-        memcpy(svsp.mvp, &sky_mvp, sizeof(sky_mvp));
+        HMM_Vec3 eye      = camera_eye(cam);
+        HMM_Vec3 cam_fwd  = HMM_NormV3(HMM_SubV3(cam->focus_target, eye));
+        HMM_Vec3 world_up = { .Elements = { 0.0f, 1.0f, 0.0f } };
+        HMM_Vec3 cam_rgt  = HMM_NormV3(HMM_Cross(cam_fwd, world_up));
+        HMM_Vec3 cam_up   = HMM_Cross(cam_rgt, cam_fwd);
+
+        float fov_y_rad  = cam->fov_y_deg * (HMM_PI / 180.0f);
+        float tan_half   = tanf(fov_y_rad * 0.5f);
+
+        starfield_star_fs_params_t sfsp = {
+            .camRight   = { cam_rgt.X, cam_rgt.Y, cam_rgt.Z, 0.0f },
+            .camUp      = { cam_up.X,  cam_up.Y,  cam_up.Z,  0.0f },
+            .camForward = { cam_fwd.X, cam_fwd.Y, cam_fwd.Z, 0.0f },
+            .params     = { tan_half, aspect, (float)state.sim_time, 0.0f },
+        };
 
         sg_apply_pipeline(state.starfield_pip);
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0] = state.starfield_vbuf });
-        sg_apply_uniforms(UB_starfield_star_vs_params, &(sg_range){ &svsp, sizeof(svsp) });
-        sg_draw(0, STARFIELD_COUNT, 1);
+        sg_apply_uniforms(UB_starfield_star_fs_params, &(sg_range){ &sfsp, sizeof(sfsp) });
+        sg_draw(0, 3, 1);
     }
 
     /* Sun next. */

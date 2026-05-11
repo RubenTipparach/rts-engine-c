@@ -684,11 +684,14 @@ static void build_bodies(void)
                     lo_alpha = 0.55f; hi_alpha = 0.30f;
                     lo_thresh = 0.45f; hi_thresh = 0.50f;
                 }
-                /* DEBUG: oversized cloud sphere so it CAN'T be confused
-                 * with the atmosphere or hidden by depth. Move back
-                 * to per-step altitudes once we see it. */
-                float cloud_lo_r = 1.30f;
-                float cloud_hi_r = 1.35f;
+                /* Cloud altitudes sit just above the planet's biome
+                 * peaks but well inside the atmosphere shell. */
+                float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
+                    ? (full->step_height / full->radius) : 0.04f;
+                int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
+                float biome_top  = 1.0f + (float)c_max * c_step;
+                float cloud_lo_r = biome_top + 1.5f * c_step;
+                float cloud_hi_r = biome_top + 3.5f * c_step;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
@@ -805,11 +808,10 @@ static void build_pipelines(void)
         },
         .index_type   = SG_INDEXTYPE_UINT16,
         /* Standard back-cull on the cloud shell (view its outside).
-         * Depth test + write on — clouds participate in the depth
-         * buffer like opaque geometry; the shader does its own
-         * alpha-test discard so transparent fragments don't pollute
-         * the depth buffer. */
-        .cull_mode    = SG_CULLMODE_NONE,
+         * Depth test enabled, depth write OFF — clouds are
+         * transparent layers and shouldn't block subsequent draws.
+         * The shader's discard handles "no cloud here" pixels. */
+        .cull_mode    = SG_CULLMODE_BACK,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,
@@ -818,7 +820,7 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 
@@ -1050,10 +1052,49 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
         }
     }
 
-    /* Cloud pass — fbm shells per cloudy planet, between the opaque
-     * terrain/water and the atmosphere shell so atmosphere haze
-     * composites *over* the cloud tops. Two layers per planet, drawn
-     * inner→outer so the higher layer alpha-blends over the lower. */
+    /* Atmosphere pass first — drawn before clouds so cloud cover can
+     * composite over atmospheric haze instead of being washed out
+     * by it at the limb. Nishita single-scatter on a back-rendered
+     * shell; the shader does its own ray-march in body-local space. */
+    sg_apply_pipeline(state.atmo_pip);
+    for (int i = 1; i < state.body_count; i++) {
+        const body_entry_t *b = &state.bodies[i];
+        if (!b->has_atmosphere) continue;
+
+        HMM_Vec3 wp    = world_pos[i];
+        HMM_Mat4 model = HMM_MulM4(
+            HMM_Translate(wp),
+            HMM_Scale((HMM_Vec3){ .Elements = { b->radius, b->radius, b->radius } }));
+        HMM_Mat4 mvp   = HMM_MulM4(view_proj, model);
+
+        /* Body-local: planet at radius 1.0, atmosphere shell at
+         * atmo_outer_mul. Pass camera + sun in body-local so the
+         * shader can integrate uniformly across planets. */
+        float    inv_r     = (b->radius > 0.0f) ? (1.0f / b->radius) : 1.0f;
+        HMM_Vec3 cam_local = HMM_MulV3F(HMM_SubV3(cam_pos, wp), inv_r);
+        HMM_Vec3 sun_local = HMM_NormV3(HMM_MulV3F(wp, -1.0f));
+
+        atmosphere_atmo_vs_params_t avsp;
+        memcpy(avsp.mvp, &mvp, sizeof(mvp));
+        atmosphere_atmo_fs_params_t afsp = {
+            .sunDir    = { sun_local.X, sun_local.Y, sun_local.Z, 0.0f },
+            .cameraPos = { cam_local.X, cam_local.Y, cam_local.Z, 0.0f },
+            .params    = { 1.0f, b->atmo_outer_mul, b->atmo_sun_intensity, 0.0f },
+        };
+
+        sg_apply_bindings(&(sg_bindings){
+            .vertex_buffers[0] = b->atmo_vbuf,
+            .index_buffer      = state.ibuf,
+        });
+        sg_apply_uniforms(UB_atmosphere_atmo_vs_params, &(sg_range){ &avsp, sizeof(avsp) });
+        sg_apply_uniforms(UB_atmosphere_atmo_fs_params, &(sg_range){ &afsp, sizeof(afsp) });
+        sg_draw(0, state.index_count, 1);
+    }
+
+    /* Cloud pass after atmosphere so clouds composite *over* the
+     * atmospheric haze. Two fbm-shell layers per cloudy planet at
+     * different altitudes, with the higher layer drawn second so
+     * its alpha goes on top of the lower layer's. */
     state.cloud_draws_last_frame = 0;
     sg_apply_pipeline(state.cloud_pip);
     for (int i = 1; i < state.body_count; i++) {
@@ -1075,9 +1116,6 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
             memcpy(cvsp.mvp, &mvp, sizeof(mvp));
             clouds_cloud_fs_params_t cfsp = {
                 .sunDir = { sun_local.X, sun_local.Y, sun_local.Z, 0.0f },
-                /* Pack: (drift_time, noise_scale, threshold, bump). The
-                 * X slot is the time the shader actually samples, with
-                 * the per-layer drift speed already applied. */
                 .params = {
                     drift_time,
                     b->cloud_params[layer].Y,
@@ -1099,51 +1137,6 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
             sg_draw(0, state.index_count, 1);
             state.cloud_draws_last_frame++;
         }
-    }
-
-    /* Atmosphere pass — Nishita single-scatter on a back-rendered
-     * shell. Drawn after every opaque planet + water but before the
-     * orbit rings; the shader does its own ray-march in body-local
-     * space, so we pass camera + sun in that frame and let the GPU
-     * integrate per-fragment. */
-    sg_apply_pipeline(state.atmo_pip);
-    for (int i = 1; i < state.body_count; i++) {
-        const body_entry_t *b = &state.bodies[i];
-        if (!b->has_atmosphere) continue;
-
-        HMM_Vec3 wp    = world_pos[i];
-        HMM_Mat4 model = HMM_MulM4(
-            HMM_Translate(wp),
-            HMM_Scale((HMM_Vec3){ .Elements = { b->radius, b->radius, b->radius } }));
-        HMM_Mat4 mvp   = HMM_MulM4(view_proj, model);
-
-        /* Body-local space: model is translate(wp) * scale(radius), so
-         *   inverse(model) = scale(1/radius) * translate(-wp)
-         * which puts the planet centre at the origin and the surface
-         * at radius 1.0. The atmosphere shell sits at atmo_outer_mul. */
-        float    inv_r        = (b->radius > 0.0f) ? (1.0f / b->radius) : 1.0f;
-        HMM_Vec3 cam_local    = HMM_MulV3F(HMM_SubV3(cam_pos, wp), inv_r);
-        /* Sun is at world origin; body is at wp. Direction from a
-         * point near the body toward the sun = -wp / |wp|. The same
-         * vector in body-local space (no rotation in the model
-         * matrix) — direction normalises away the scale. */
-        HMM_Vec3 sun_local    = HMM_NormV3(HMM_MulV3F(wp, -1.0f));
-
-        atmosphere_atmo_vs_params_t avsp;
-        memcpy(avsp.mvp, &mvp, sizeof(mvp));
-        atmosphere_atmo_fs_params_t afsp = {
-            .sunDir    = { sun_local.X, sun_local.Y, sun_local.Z, 0.0f },
-            .cameraPos = { cam_local.X, cam_local.Y, cam_local.Z, 0.0f },
-            .params    = { 1.0f, b->atmo_outer_mul, b->atmo_sun_intensity, 0.0f },
-        };
-
-        sg_apply_bindings(&(sg_bindings){
-            .vertex_buffers[0] = b->atmo_vbuf,
-            .index_buffer      = state.ibuf,
-        });
-        sg_apply_uniforms(UB_atmosphere_atmo_vs_params, &(sg_range){ &avsp, sizeof(avsp) });
-        sg_apply_uniforms(UB_atmosphere_atmo_fs_params, &(sg_range){ &afsp, sizeof(afsp) });
-        sg_draw(0, state.index_count, 1);
     }
 
     /* Orbit rings drawn after opaque bodies so transparency composites

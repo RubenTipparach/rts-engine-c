@@ -60,55 +60,19 @@ float fbm3(vec3 p) {
 }
 
 void main() {
-    float t        = params.x;
-    float scale    = params.y;
-    float thresh   = params.z;
-    float bumpAmt  = params.w;
-
-    vec3 N = normalize(vLocal);
-
-    /* Drift the noise lattice along a fixed axis so cloud shapes
-     * shift coherently over time without the layer rotating. */
-    vec3 base = N * scale + vec3(t, t * 0.6, t * -0.4);
-
-    /* Build a tangent frame on the sphere so we can sample neighbours
-     * at small offsets *along the surface* — ε is in the same units
-     * as `base`, i.e. scale-relative. */
-    vec3 up = abs(N.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    vec3 tng = normalize(cross(up, N));
-    vec3 btn = cross(N, tng);
-    float eps = 0.15;
-
-    float d  = fbm3(base);
-    float du = fbm3(base + tng * eps) - d;
-    float dv = fbm3(base + btn * eps) - d;
-
-    /* Bumped normal: tilt the surface normal toward the noise
-     * gradient. bumpAmt is intentionally small — heavy perturbation
-     * pushes N_bump past horizontal and Lambert collapses to the
-     * ambient floor, which then gets multiplied by day → cloud
-     * pixel ends up near-black. */
-    vec3 N_bump = normalize(N - (tng * du + btn * dv) * bumpAmt);
-
-    /* Cloud density: smooth threshold so the edges of cells fade
-     * out instead of cutting off as a hard step. */
-    float density = smoothstep(thresh, thresh + 0.15, d);
-    if (density < 0.01) discard;
-
-    /* Lambert on the bumped normal with a generous ambient floor.
-     * Clouds on the unlit side still need to be visible faintly,
-     * not crushed to black. */
-    vec3  L     = normalize(sunDir.xyz);
-    float NdotL = max(dot(N_bump, L), 0.0);
-    float lit   = 0.45 + 0.55 * NdotL;
-
-    /* Day-side fade only controls *alpha* (visibility), not colour.
-     * Multiplying color by day too gave a double attenuation that
-     * dimmed clouds into invisibility on the terminator. */
-    float day = smoothstep(-0.25, 0.30, dot(N, L));
-
-    float alpha = density * color.a * day;
-    FragColor   = vec4(color.rgb * lit, alpha);
+    /* DEBUG — force all FS uniforms to be referenced (so sokol-shdc
+     * doesn't strip the block) but bypass the density/discard logic.
+     * If the cloud sphere appears as a Lambert-lit globe in the
+     * cloud's planet-specific tint, the pipeline + bindings + cull
+     * + depth are all fine and the bug was in the density math.
+     * If nothing appears, the issue is C-side dispatch. */
+    vec3  N        = normalize(vLocal);
+    vec3  L        = normalize(sunDir.xyz);
+    float NdotL    = max(dot(N, L), 0.0);
+    float lit      = 0.30 + 0.70 * NdotL;
+    /* Touch params + bumpAmt so the block isn't dead-stripped. */
+    float keep     = (params.x + params.y + params.z + params.w) * 1e-6;
+    FragColor = vec4(color.rgb * lit + vec3(keep), color.a);
 }
 @end
 

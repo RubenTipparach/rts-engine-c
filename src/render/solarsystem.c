@@ -802,11 +802,11 @@ static void build_pipelines(void)
             },
         },
         .index_type   = SG_INDEXTYPE_UINT16,
-        /* Standard back-cull on the cloud shell (we view its outside).
-         * Alpha-blended over terrain + water; depth-test on, depth-
-         * write off so the second layer can composite over the
-         * first without z-fighting. */
-        .cull_mode    = SG_CULLMODE_BACK,
+        /* DEBUG — most permissive cull + depth state to force clouds
+         * visible regardless of geometry occlusion. If clouds appear
+         * with NONE/ALWAYS we know the previous cull_BACK or depth-
+         * LESS_EQUAL was rejecting all fragments. */
+        .cull_mode    = SG_CULLMODE_NONE,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,
@@ -815,7 +815,7 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 
@@ -890,6 +890,17 @@ void solarsystem_init(const solarsystem_config_t  *cfg,
     build_bodies();
     build_pipelines();
     state.inited = true;
+
+    /* Diagnostic: dump per-body cloud setup so we can confirm at a
+     * glance which bodies have cloud vbufs + layer counts. If the
+     * counts look right but clouds are still invisible, the bug is
+     * in pipeline state or draw dispatch, not in build_bodies. */
+    for (int i = 0; i < state.body_count; i++) {
+        const body_entry_t *b = &state.bodies[i];
+        LOG_INFO("body[%d] %-9s kind=%d radius=%.2f clouds=%d water=%d atmo=%d",
+                 i, b->name, (int)b->kind, b->radius,
+                 b->cloud_layers, (int)b->has_water, (int)b->has_atmosphere);
+    }
 }
 
 sg_pass_action solarsystem_pass_action(void)

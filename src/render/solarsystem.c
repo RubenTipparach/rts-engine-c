@@ -679,24 +679,25 @@ static void build_bodies(void)
                     lo_alpha = 0.55f; hi_alpha = 0.30f;
                     lo_thresh = 0.45f; hi_thresh = 0.50f;
                 }
-                /* Cloud altitudes sit just above the highest biome
-                 * peak so they don't clip into snow caps. With
-                 * upstream's absolute LevelH heights the planet
-                 * surface goes up to 1.0 + max_level * step_unit;
-                 * clouds float a bit above that. */
+                /* Cloud altitudes sit clearly above the highest biome
+                 * peak so they don't merge into snow caps. */
                 float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
                     ? (full->step_height / full->radius) : 0.04f;
                 int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
                 float biome_top  = 1.0f + (float)c_max * c_step;
-                float cloud_lo_r = biome_top + 0.5f * c_step;
-                float cloud_hi_r = biome_top + 2.0f * c_step;
+                float cloud_lo_r = biome_top + 1.5f * c_step;
+                float cloud_hi_r = biome_top + 3.5f * c_step;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
-                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 4.0f } };
+                /* Per-layer params: (drift_speed, noise_scale, density_threshold, bump_strength).
+                 * bump_strength is intentionally small (0.5-1.0) — heavy
+                 * bump tilts the perturbed normal past horizontal and
+                 * Lambert collapses to ambient. */
+                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 0.8f } };
                 b->cloud_vbuf[1]   = build_cloud_vbuf(cloud_hi_r, "clouds-high");
                 b->cloud_color[1]  = (HMM_Vec4){ .Elements = { hi_color.X, hi_color.Y, hi_color.Z, hi_alpha } };
-                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 3.0f } };
+                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 0.5f } };
                 b->cloud_layers    = 2;
             }
         }

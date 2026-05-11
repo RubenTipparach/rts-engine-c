@@ -84,8 +84,10 @@ void main() {
     float dv = fbm3(base + btn * eps) - d;
 
     /* Bumped normal: tilt the surface normal toward the noise
-     * gradient so denser cloud bumps catch more sun, simulating
-     * 3D thickness without a ray-march. */
+     * gradient. bumpAmt is intentionally small — heavy perturbation
+     * pushes N_bump past horizontal and Lambert collapses to the
+     * ambient floor, which then gets multiplied by day → cloud
+     * pixel ends up near-black. */
     vec3 N_bump = normalize(N - (tng * du + btn * dv) * bumpAmt);
 
     /* Cloud density: smooth threshold so the edges of cells fade
@@ -93,18 +95,20 @@ void main() {
     float density = smoothstep(thresh, thresh + 0.15, d);
     if (density < 0.01) discard;
 
-    /* Lambert on the bumped normal, with a small ambient floor so
-     * the night side doesn't crush to black. */
+    /* Lambert on the bumped normal with a generous ambient floor.
+     * Clouds on the unlit side still need to be visible faintly,
+     * not crushed to black. */
     vec3  L     = normalize(sunDir.xyz);
     float NdotL = max(dot(N_bump, L), 0.0);
-    float lit   = 0.20 + 0.80 * NdotL;
+    float lit   = 0.45 + 0.55 * NdotL;
 
-    /* Day-side fade — clouds on the night side are dim but visible
-     * (gives the planet a faint "ringlight" of high-altitude haze). */
+    /* Day-side fade only controls *alpha* (visibility), not colour.
+     * Multiplying color by day too gave a double attenuation that
+     * dimmed clouds into invisibility on the terminator. */
     float day = smoothstep(-0.25, 0.30, dot(N, L));
 
     float alpha = density * color.a * day;
-    FragColor = vec4(color.rgb * lit * day, alpha);
+    FragColor   = vec4(color.rgb * lit, alpha);
 }
 @end
 

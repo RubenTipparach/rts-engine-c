@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "core/noise.h"
+#include "render/goldberg.h"
 #include "render/sphere.h"
 #include "gen/sun.glsl.h"
 #include "gen/solarsystem.glsl.h"
@@ -39,17 +40,14 @@
  * runtime — clamped to [8, ORBIT_RING_MAX_SEGMENTS]. */
 #define ORBIT_RING_MAX_SEGMENTS 128
 
-/* 1500 stars is enough to read as a busy starfield at typical screen
- * sizes without overpainting the planets. All baked once at init. */
-#define STARFIELD_COUNT 1500
-
-typedef struct {
-    HMM_Vec3 pos;     /* unit-sphere direction (stars are at infinity) */
-    HMM_Vec3 color;   /* baked brightness + slight tint */
-} star_vertex_t;
-
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
+
+/* Goldberg subdiv 3 → 642 cells. Each cell emits up to 6 hex tris
+ * for the top fan + up to 6 walls × 4 tris (double-sided) = 30
+ * tris per cell × 3 verts = 90 verts per cell. 642 × 90 = 57780,
+ * comfortably under the uint16 cap. */
+#define BIOME_VBUF_MAX      65535
 
 typedef struct {
     HMM_Vec3 pos;        /* 0  */
@@ -179,12 +177,20 @@ static int                   s_unit_v_count;
 static int                   s_unit_i_count;
 static sphere_full_vertex_t  s_full_scratch[SPHERE_MAX_VERTS];
 
-/* Cell-stepped biome path — duplicates the per-quad verts so adjacent
- * cells with different biomes get crisp colour boundaries. Sized for
- * one vertex per index in the original sphere mesh, since that's the
- * upper bound when no edges are shared. */
-static sphere_full_vertex_t  s_biome_scratch[SPHERE_MAX_INDICES];
-static uint16_t              s_biome_indices[SPHERE_MAX_INDICES];
+/* Goldberg cell-stepped biome path — fan-triangulated verts per cell,
+ * duplicated across cells so adjacent biomes render with crisp
+ * colour breaks. */
+static sphere_full_vertex_t  s_biome_scratch[BIOME_VBUF_MAX];
+static uint16_t              s_biome_indices[BIOME_VBUF_MAX];
+
+/* Goldberg cell list — built once at init from a level-3 icosphere.
+ * Shared across every biome planet (same subdiv → same cell layout);
+ * per-planet differences are baked into the per-vertex colour. */
+static goldberg_cell_t       s_goldberg_cells[GOLDBERG_MAX_CELLS];
+static int                   s_goldberg_cell_count;
+/* Index count of the biome ibuf — set after the first planet builds
+ * so the shared sequential ibuf can be sized correctly. */
+static int                   s_biome_index_count;
 
 static sg_buffer build_body_vbuf(HMM_Vec3 color, float brightness, const char *label)
 {
@@ -287,127 +293,190 @@ static int planet_biome_index(HMM_Vec3 unit_pos, const planet_full_config_t *p)
     return biome;
 }
 
-/* Cell-stepped biome bake. Walks the sphere mesh one *quad* at a time
- * (two consecutive triangles share the quad's biome), samples noise
- * at the quad centroid, then emits 6 fresh verts (3 per triangle)
- * each displaced radially inward by the biome's step. Adjacent quads
- * with different biomes don't share verts, so colour boundaries are
- * crisp and the height drop creates a visible cliff between cells.
+/* Goldberg cell-stepped biome bake. Walks the precomputed Goldberg
+ * cells (each cell is a hex or penta polygon on the unit sphere),
+ * samples noise at the cell centre, picks a biome, and fan-emits
+ * triangles around the cell with the biome's colour and the
+ * biome-driven cliff drop applied to *all* the cell's verts. Adjacent
+ * cells of different biomes don't share verts, so colour boundaries
+ * are crisp and the radial drop creates a visible cliff at the seam.
  *
- * step_unit = step_height / planet_radius converts the upstream's
- * world-space step into unit-sphere coordinates so the model matrix
- * scaling stays linear. Highest biome stays at the unit-sphere
- * surface; each lower biome drops by `(max_level - biome) * step_unit`. */
-static sg_buffer build_planet_biome_vbuf(const planet_full_config_t *p, const char *label)
+ *   step_unit = step_height / planet_radius
+ *   drop      = (max_level - biome) * step_unit
+ *   r         = 1.0 - drop
+ *
+ * The fan-triangle layout is (centre, corner[i], corner[(i+1) mod N])
+ * so each cell contributes N triangles — 5 for pentagons, 6 for
+ * hexagons. Triangle winding is CCW from outside the sphere because
+ * the corners themselves are ordered CCW around the centre's outward
+ * normal. */
+/* Replicates upstream PlanetMesh.cs's EmitCellGeometry exactly (modulo
+ * chamfer + slopes — those are a follow-up). Every cell sits at
+ * absolute heights anchored to the planet surface (radius 1.0 in
+ * body-local space), not radial drops:
+ *
+ *   level_h(0) = 1.0 + 0.75 * step_unit   // water surface
+ *   level_h(k) = 1.0 + k    * step_unit   // for k > 0
+ *
+ * Level-0 cells are special: they emit a *seabed fan* at radius 1.0
+ * (the planet base), NOT at level_h(0). For ocean planets the
+ * separate water shell mesh sits above them at level_h(0) so the
+ * water visually covers the seabed; for non-ocean planets level-0
+ * cells just read as recessed canyons. Walls from a land cell to a
+ * level-0 neighbour drop to the seabed (1.0), not to level_h(0).
+ *
+ * Walls are double-sided (4 triangles per wall) so they're visible
+ * from either face — matches upstream's two-sided index winding and
+ * means the slope/chamfer follow-ups don't need special-casing for
+ * culling direction.
+ *
+ * Suppression: at each shared edge, only the higher of the two
+ * cells emits the wall (the lower skips). For cells of equal level,
+ * neither emits anything — adjacent same-level tops meet flush. */
+static sg_buffer build_planet_goldberg_vbuf(const planet_full_config_t *p, const char *label,
+                                             int *out_index_count)
 {
-    int v_out      = 0;
-    int max_level  = (p->level_count > 0) ? (p->level_count - 1) : 0;
-    /* If radius is zero (shouldn't happen but be defensive) skip the
-     * height step so we still draw a colour-only sphere instead of
-     * collapsing to the origin. */
+    int v_out     = 0;
     float step_unit = (p->radius > 0.0f && p->step_height > 0.0f)
-        ? (p->step_height / p->radius) : 0.0f;
+        ? (p->step_height / p->radius) : 0.04f;
 
-    /* Each quad is 6 consecutive indices in the sphere ibuf
-     * (a-c-b, a-d-c — see sphere_make_uv()). */
-    for (int q = 0; q + 6 <= s_unit_i_count; q += 6) {
-        uint16_t ia = s_unit_indices[q + 0];
-        uint16_t ic = s_unit_indices[q + 1];
-        uint16_t ib = s_unit_indices[q + 2];
-        uint16_t id = s_unit_indices[q + 4];
+    /* Convert biome index → absolute radial distance (in unit-sphere
+     * space). Mirrors PlanetMesh.LevelH(byte). */
+    #define LEVEL_H(level) ((level) == 0 ? (1.0f + 0.75f * step_unit) \
+                                         : (1.0f + (float)(level) * step_unit))
+    /* Wall to a level-0 neighbour from a land cell drops to the
+     * seabed, which sits at the planet base (radius 1.0). */
+    const float SEABED_H = 1.0f;
 
-        HMM_Vec3 ua = s_unit_verts[ia].pos;
-        HMM_Vec3 ub = s_unit_verts[ib].pos;
-        HMM_Vec3 uc = s_unit_verts[ic].pos;
-        HMM_Vec3 ud = s_unit_verts[id].pos;
+    /* Pre-pass: classify every cell. */
+    static int cell_level[GOLDBERG_MAX_CELLS];
+    for (int c = 0; c < s_goldberg_cell_count; c++) {
+        cell_level[c] = planet_biome_index(s_goldberg_cells[c].center, p);
+    }
 
-        HMM_Vec3 cen = HMM_NormV3((HMM_Vec3){
-            .Elements = {
-                (ua.X + ub.X + uc.X + ud.X) * 0.25f,
-                (ua.Y + ub.Y + uc.Y + ud.Y) * 0.25f,
-                (ua.Z + ub.Z + uc.Z + ud.Z) * 0.25f,
-            }
-        });
-        int      biome = planet_biome_index(cen, p);
-        HMM_Vec3 col   = (p->level_count > 0 && biome < p->level_count)
-            ? p->levels[biome].color
+    /* Pass 1 — cell tops + level-0 seabeds. */
+    for (int c = 0; c < s_goldberg_cell_count; c++) {
+        const goldberg_cell_t *cell = &s_goldberg_cells[c];
+        int      level = cell_level[c];
+        HMM_Vec3 col   = (p->level_count > 0 && level < p->level_count)
+            ? p->levels[level].color
             : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
 
-        float drop = step_unit * (float)(max_level - biome);
-        float r    = 1.0f - drop;
-        HMM_Vec3 pa = HMM_MulV3F(ua, r);
-        HMM_Vec3 pb = HMM_MulV3F(ub, r);
-        HMM_Vec3 pc = HMM_MulV3F(uc, r);
-        HMM_Vec3 pd = HMM_MulV3F(ud, r);
+        /* Level-0 cells emit only a seabed fan at radius 1.0 (no top
+         * fan at the water surface — that's the separate water
+         * mesh's job for ocean planets, and recessed canyons read
+         * correctly for non-ocean). Other levels emit their top fan
+         * at level_h(level). */
+        float    h   = (level == 0) ? SEABED_H : LEVEL_H(level);
+        HMM_Vec3 ctr = HMM_MulV3F(cell->center, h);
 
-        /* Triangle 1: a-c-b. Normals stay radial (= the unit-sphere
-         * direction) so lighting on the cell-top reads correctly even
-         * after the inward push. */
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, ua, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, uc, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pb, ub, col, 1.0f };
-        /* Triangle 2: a-d-c */
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pa, ua, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pd, ud, col, 1.0f };
-        s_biome_scratch[v_out++] = (sphere_full_vertex_t){ pc, uc, col, 1.0f };
+        for (int k = 0; k < cell->corner_count; k++) {
+            HMM_Vec3 u_k0 = cell->corners[k];
+            HMM_Vec3 u_k1 = cell->corners[(k + 1) % cell->corner_count];
+            HMM_Vec3 c0   = HMM_MulV3F(u_k0, h);
+            HMM_Vec3 c1   = HMM_MulV3F(u_k1, h);
+
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ ctr, cell->center, col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c0,  u_k0,         col, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ c1,  u_k1,         col, 1.0f };
+        }
     }
+
+    /* Pass 2 — cliff walls. Match upstream's wall emission:
+     *   - wall to water from land drops to seabed
+     *   - wall double-sided (front + back triangles)
+     *   - lower cell skips (only higher emits) */
+    for (int c = 0; c < s_goldberg_cell_count; c++) {
+        const goldberg_cell_t *cell = &s_goldberg_cells[c];
+        int      level   = cell_level[c];
+        HMM_Vec3 col_me  = (p->level_count > 0 && level < p->level_count)
+            ? p->levels[level].color
+            : (HMM_Vec3){ .Elements = { 1, 1, 1 } };
+
+        float my_top = (level == 0) ? SEABED_H : LEVEL_H(level);
+
+        for (int k = 0; k < cell->corner_count; k++) {
+            int n = cell->neighbors[k];
+            if (n < 0 || n >= s_goldberg_cell_count) continue;
+            int n_level = cell_level[n];
+
+            /* Wall-to-water-from-land special case (upstream:
+             *   nh = (level != 0 && nLevel == 0) ? Radius : LevelH(nLevel) ) */
+            float n_top;
+            if (level != 0 && n_level == 0) {
+                n_top = SEABED_H;
+            } else {
+                n_top = (n_level == 0) ? SEABED_H : LEVEL_H(n_level);
+            }
+
+            /* Suppression: skip if I'm not strictly higher. */
+            if (my_top <= n_top + 1e-5f) continue;
+
+            HMM_Vec3 u_a = cell->corners[k];
+            HMM_Vec3 u_b = cell->corners[(k + 1) % cell->corner_count];
+
+            HMM_Vec3 top_a = HMM_MulV3F(u_a, my_top);
+            HMM_Vec3 top_b = HMM_MulV3F(u_b, my_top);
+            HMM_Vec3 bot_a = HMM_MulV3F(u_a, n_top);
+            HMM_Vec3 bot_b = HMM_MulV3F(u_b, n_top);
+
+            HMM_Vec3 wall_n = HMM_NormV3(HMM_AddV3(u_a, u_b));
+
+            /* Double-sided: front winding + back winding so the wall
+             * renders correctly from either face. Matches upstream's
+             * two-sided wall winding (4 indices × 2 sides = 12). */
+            /* Front: top_a → top_b → bot_b, top_a → bot_b → bot_a */
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_b, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, wall_n, col_me, 1.0f };
+
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, wall_n, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_a, wall_n, col_me, 1.0f };
+
+            /* Back winding (verts go opposite order so face culled-
+             * away triangles still show up from the inside): */
+            HMM_Vec3 nback = HMM_MulV3F(wall_n, -1.0f);
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_b, nback, col_me, 1.0f };
+
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ top_a, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_a, nback, col_me, 1.0f };
+            s_biome_scratch[v_out++] = (sphere_full_vertex_t){ bot_b, nback, col_me, 1.0f };
+
+            if (v_out + 12 > BIOME_VBUF_MAX) {
+                LOG_ERROR("solarsystem: biome scratch overflow on planet %s", p->name);
+                goto done;
+            }
+        }
+    }
+
+done:
+    if (out_index_count) *out_index_count = v_out;
     return sg_make_buffer(&(sg_buffer_desc){
         .data  = { .ptr = s_biome_scratch,
                    .size = (size_t)v_out * sizeof(sphere_full_vertex_t) },
         .label = label,
     });
+
+    #undef LEVEL_H
 }
 
 /* ---- starfield ---- */
 
-/* Tiny LCG (numerical recipes constants) — deterministic seed-driven
- * random for reproducible star placement across runs/builds. */
-static uint32_t star_lcg_next(uint32_t *s)
-{
-    *s = *s * 1664525u + 1013904223u;
-    return *s;
-}
-static float star_lcg_unit(uint32_t *s) { return (float)(star_lcg_next(s) >> 8) / (float)(1u << 24); }
-
+/* Fullscreen triangle in NDC. The starfield shader uses aPos.xy as
+ * NDC coordinates directly (gl_Position = vec4(aPos.xy, 0.99999, 1))
+ * so the triangle just needs to cover the [-1,1] viewport — extend
+ * two corners beyond to avoid edge artifacts. Matches the upstream
+ * starfield.glsl's fullscreen-triangle convention. */
 static void build_starfield(void)
 {
-    static star_vertex_t verts[STARFIELD_COUNT];
-    uint32_t seed = 0xDEADBEEFu;
-
-    for (int i = 0; i < STARFIELD_COUNT; i++) {
-        /* Marsaglia method for a uniform random direction on the
-         * unit sphere — avoids the pole-clustering that you get
-         * from picking lat/long uniformly. */
-        float u, v, s2;
-        do {
-            u = star_lcg_unit(&seed) * 2.0f - 1.0f;
-            v = star_lcg_unit(&seed) * 2.0f - 1.0f;
-            s2 = u * u + v * v;
-        } while (s2 >= 1.0f || s2 == 0.0f);
-        float t = sqrtf(1.0f - s2);
-        verts[i].pos = (HMM_Vec3){ .Elements = { 2.0f * u * t, 2.0f * v * t, 1.0f - 2.0f * s2 } };
-
-        /* Quantised brightness — pixel-art star palettes typically
-         * have a handful of intensity steps rather than continuous
-         * fade. ~70% dim, 22% medium, 7% bright, 1% very bright. */
-        float r       = star_lcg_unit(&seed);
-        float bright;
-        if      (r < 0.70f) bright = 0.18f;
-        else if (r < 0.92f) bright = 0.40f;
-        else if (r < 0.99f) bright = 0.70f;
-        else                bright = 1.00f;
-
-        /* Slight per-star tint — most stars white, some warm, some
-         * cool. Variation is tiny so the field reads as "stars" not
-         * "confetti." */
-        float tint = star_lcg_unit(&seed);
-        HMM_Vec3 col;
-        if      (tint < 0.30f) col = (HMM_Vec3){ .Elements = { 1.00f, 0.92f, 0.78f } }; /* warm */
-        else if (tint < 0.55f) col = (HMM_Vec3){ .Elements = { 0.85f, 0.92f, 1.00f } }; /* cool */
-        else                   col = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } }; /* white */
-        verts[i].color = HMM_MulV3F(col, bright);
-    }
-
+    static const HMM_Vec3 verts[3] = {
+        { .Elements = { -1.0f, -1.0f, 0.0f } },
+        { .Elements = {  3.0f, -1.0f, 0.0f } },
+        { .Elements = { -1.0f,  3.0f, 0.0f } },
+    };
     state.starfield_vbuf = sg_make_buffer(&(sg_buffer_desc){
         .data  = { .ptr = verts, .size = sizeof(verts) },
         .label = "starfield-vbuf",
@@ -433,18 +502,27 @@ static void build_geometry(void)
     });
     state.index_count = s_unit_i_count;
 
-    /* Sequential ibuf for the cell-stepped biome path. Indexes into
-     * each planet's per-quad-duplicated vbuf, where each triangle's
-     * three verts are stored contiguously. */
-    for (int i = 0; i < s_unit_i_count; i++) {
+    /* Goldberg hex sphere — replaces the UV sphere for biome planets.
+     * Built once at level 3 (642 cells); promote to a per-planet
+     * subdivision when we want Earth coarser than Glacius, etc. */
+    if (!goldberg_make(3, s_goldberg_cells, GOLDBERG_MAX_CELLS, &s_goldberg_cell_count)) {
+        LOG_ERROR("solarsystem: goldberg mesh did not fit in static buffers");
+        s_goldberg_cell_count = 0;
+    }
+
+    /* Sequential ibuf sized for the worst-case biome vbuf (cell tops
+     * + cliff walls). Each planet's actual draw_count is whatever
+     * its biome bake produced, always <= BIOME_VBUF_MAX. */
+    for (int i = 0; i < BIOME_VBUF_MAX; i++) {
         s_biome_indices[i] = (uint16_t)i;
     }
     state.ibuf_biome = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .index_buffer = true },
         .data  = { .ptr = s_biome_indices,
-                   .size = (size_t)s_unit_i_count * sizeof(uint16_t) },
+                   .size = (size_t)BIOME_VBUF_MAX * sizeof(uint16_t) },
         .label = "sphere-biome-ibuf",
     });
+    s_biome_index_count = BIOME_VBUF_MAX;
 
     /* Unit-radius circle in the xz plane, line-strip with the first
      * vertex repeated at the end so we get a closed loop. Segment
@@ -506,30 +584,34 @@ static void build_bodies(void)
             b->parent_index = -1;
             b->zoom_min     = pl->self.zoom_min;
             b->zoom_max     = pl->self.zoom_max;
-            /* If the per-planet YAML loaded successfully, use its
-             * biome levels for cell-stepped per-quad colour; otherwise
-             * fall back to the flat colour from solarsystem.yaml. */
+            /* If the per-planet YAML loaded successfully *and* the
+             * Goldberg mesh built, use cell-stepped colour. Otherwise
+             * fall back to the smooth UV-sphere with the planet's
+             * flat colour. */
             bool biome_path = (full && full->level_count > 0
-                                    && full->noise_threshold_count > 0);
+                                    && full->noise_threshold_count > 0
+                                    && s_goldberg_cell_count > 0);
             if (biome_path) {
-                b->vbuf       = build_planet_biome_vbuf(full, pl->self.name);
+                int gidx = 0;
+                b->vbuf       = build_planet_goldberg_vbuf(full, pl->self.name, &gidx);
                 b->ibuf       = state.ibuf_biome;
-                b->draw_count = state.index_count;
+                b->draw_count = gidx;
             } else {
                 b->vbuf       = build_body_vbuf(pl->self.color, 1.0f, pl->self.name);
                 b->ibuf       = state.ibuf;
                 b->draw_count = state.index_count;
             }
 
-            /* Water shell — only for ocean planets. Sea-level radius
-             * sits at level-1 (the lowest *land* biome): drop one
-             * step from the top biome × (level_count - 2). */
+            /* Water shell — only for ocean planets. Sits at upstream's
+             * LevelH(0) = R + 0.75 * StepHeight (the water surface,
+             * which is above the seabed at R = unit-sphere radius 1.0
+             * but below the level-1 sand cells at 1.0 + 1*step_unit). */
             if (biome_path && full->ocean_level0 && full->has_water
                 && full->radius > 0.0f && full->step_height > 0.0f
                 && full->level_count >= 2)
             {
                 float step_unit       = full->step_height / full->radius;
-                float sea_level_unit  = 1.0f - step_unit * (float)(full->level_count - 2);
+                float sea_level_unit  = 1.0f + 0.75f * step_unit;
                 b->water_vbuf = build_water_vbuf(full->water_color, sea_level_unit,
                                                  pl->self.name);
                 b->has_water  = true;
@@ -539,30 +621,82 @@ static void build_bodies(void)
              * The Nishita shader picks colour from Rayleigh
              * wavelengths × sunIntensity, so we just plumb the YAML
              * knobs through. Sun intensity falls back to upstream's
-             * 30.0 default if the YAML omits it. */
+             * 30.0 default if the YAML omits it.
+             *
+             * The YAML's outerRadiusMul (1.5 for Earth) leaves a big
+             * visible shell gap between the planet's surface (radius
+             * 1.0) and the bright atmospheric limb (radius 1.5). We
+             * shrink the *thickness* of the atmosphere by 0.4 so the
+             * limb hugs the planet, while keeping the YAML pristine.
+             *   visible_outer = 1.0 + (yaml_outer - 1.0) * 0.4 */
             if (biome_path && full->has_atmosphere && full->atmosphere_outer_mul > 1.0f) {
-                b->atmo_vbuf          = build_atmosphere_vbuf(full->atmosphere_outer_mul, pl->self.name);
-                b->atmo_outer_mul     = full->atmosphere_outer_mul;
+                const float ATMO_THICKNESS_SCALE = 0.4f;
+                float visible_outer = 1.0f + (full->atmosphere_outer_mul - 1.0f) * ATMO_THICKNESS_SCALE;
+                b->atmo_vbuf          = build_atmosphere_vbuf(visible_outer, pl->self.name);
+                b->atmo_outer_mul     = visible_outer;
                 b->atmo_sun_intensity = (full->atmosphere_sun_intensity > 0.0f)
                     ? full->atmosphere_sun_intensity : 30.0f;
                 b->has_atmosphere     = true;
             }
 
-            /* Cloud layers — enabled for any planet with both water
-             * AND atmosphere (a cheap proxy for "wet, breathable"
-             * worlds). Two layers per planet: a denser low layer at
-             * ~ planet+5% radius, a wispier high layer at +9%. The
-             * shader's `params` is (drift_time, scale, threshold,
-             * bump_strength); cloud_color is rgb + max alpha. The
-             * drift_time vec is updated per-frame from sim_time,
-             * the rest is static per-planet. */
-            if (biome_path && full->has_water && full->has_atmosphere) {
-                b->cloud_vbuf[0]   = build_cloud_vbuf(1.05f, "clouds-low");
-                b->cloud_color[0]  = (HMM_Vec4){ .Elements = { 1.00f, 1.00f, 1.00f, 0.85f } };
-                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, 0.50f, 4.0f } };
-                b->cloud_vbuf[1]   = build_cloud_vbuf(1.09f, "clouds-high");
-                b->cloud_color[1]  = (HMM_Vec4){ .Elements = { 1.00f, 1.00f, 1.00f, 0.40f } };
-                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, 0.55f, 3.0f } };
+            /* Cloud layers — every planet with an atmosphere gets some
+             * variant of weather. Per-planet colour + density makes
+             * the four worlds visually distinct from a distance:
+             *   Earth  — white, full coverage
+             *   Glacius — pale blue, icy
+             *   Venus  — yellowish, thick / opaque
+             *   Mars   — dusty red, thin / sparse
+             * If the planet doesn't have atmosphere, no clouds. */
+            if (biome_path && full->has_atmosphere) {
+                /* Default values — most planets are white with full
+                 * coverage. Per-planet overrides below shape the
+                 * look (icy/yellow/dust). Thresholds dropped to 0.30
+                 * so clouds are unambiguously visible (mean fbm sample
+                 * is ~0.47, so ~70% of cells now have alpha>0). If you
+                 * see clouds you don't want, narrow the threshold;
+                 * if you see none, that's a real bug. */
+                HMM_Vec3 lo_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
+                HMM_Vec3 hi_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
+                float    lo_alpha = 0.85f;
+                float    hi_alpha = 0.45f;
+                float    lo_thresh = 0.30f;
+                float    hi_thresh = 0.35f;
+                /* Cheap per-planet identification by biome palette
+                 * (avoids adding another YAML field for now). The
+                 * lookup is by name match in the body entry. */
+                if (strcmp(b->name, "Glacius") == 0) {
+                    lo_color = (HMM_Vec3){ .Elements = { 0.90f, 0.95f, 1.00f } };
+                    hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.90f, 1.00f } };
+                    lo_alpha = 0.70f; hi_alpha = 0.30f;
+                } else if (strcmp(b->name, "Venus") == 0) {
+                    lo_color = (HMM_Vec3){ .Elements = { 0.95f, 0.85f, 0.55f } };
+                    hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.70f, 0.40f } };
+                    lo_alpha = 0.95f; hi_alpha = 0.65f;
+                    lo_thresh = 0.35f; hi_thresh = 0.40f;
+                } else if (strcmp(b->name, "Mars") == 0) {
+                    lo_color = (HMM_Vec3){ .Elements = { 0.85f, 0.55f, 0.40f } };
+                    hi_color = (HMM_Vec3){ .Elements = { 0.75f, 0.50f, 0.40f } };
+                    lo_alpha = 0.55f; hi_alpha = 0.30f;
+                    lo_thresh = 0.45f; hi_thresh = 0.50f;
+                }
+                /* Cloud altitudes sit just above the highest biome
+                 * peak so they don't clip into snow caps. With
+                 * upstream's absolute LevelH heights the planet
+                 * surface goes up to 1.0 + max_level * step_unit;
+                 * clouds float a bit above that. */
+                float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
+                    ? (full->step_height / full->radius) : 0.04f;
+                int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
+                float biome_top  = 1.0f + (float)c_max * c_step;
+                float cloud_lo_r = biome_top + 0.5f * c_step;
+                float cloud_hi_r = biome_top + 2.0f * c_step;
+
+                b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
+                b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
+                b->cloud_params[0] = (HMM_Vec4){ .Elements = { 0.020f, 4.0f, lo_thresh, 4.0f } };
+                b->cloud_vbuf[1]   = build_cloud_vbuf(cloud_hi_r, "clouds-high");
+                b->cloud_color[1]  = (HMM_Vec4){ .Elements = { hi_color.X, hi_color.Y, hi_color.Z, hi_alpha } };
+                b->cloud_params[1] = (HMM_Vec4){ .Elements = { 0.040f, 9.0f, hi_thresh, 3.0f } };
                 b->cloud_layers    = 2;
             }
         }
@@ -637,22 +771,19 @@ static void build_pipelines(void)
     state.starfield_pip = sg_make_pipeline(&(sg_pipeline_desc){
         .shader = state.starfield_shd,
         .layout = {
-            .buffers[0] = { .stride = sizeof(star_vertex_t) },
+            .buffers[0] = { .stride = sizeof(HMM_Vec3) },
             .attrs = {
                 [ATTR_starfield_starfield_aPos] = {
-                    .offset = offsetof(star_vertex_t, pos),
-                    .format = SG_VERTEXFORMAT_FLOAT3,
-                },
-                [ATTR_starfield_starfield_aColor] = {
-                    .offset = offsetof(star_vertex_t, color),
+                    .offset = 0,
                     .format = SG_VERTEXFORMAT_FLOAT3,
                 },
             },
         },
-        .primitive_type = SG_PRIMITIVETYPE_POINTS,
-        /* Stars sit at the far plane; disable depth-write so the
-         * solar system draws on top of them but stars don't fight
-         * each other. */
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLES,
+        /* Fullscreen triangle at z=0.99999 (just shy of the far
+         * plane) so the rest of the scene depth-tests over it.
+         * Depth compare ALWAYS / write off keeps the starfield
+         * out of the way of subsequent draws. */
         .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "starfield-pipeline",
     });
@@ -802,22 +933,32 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
     HMM_Vec3 world_pos[MAX_BODIES];
     resolve_world_positions(world_pos);
 
-    /* Starfield first — far behind everything else. View matrix has
-     * its translation zeroed so stars stay locked to the camera's
-     * orientation but never translate, giving the celestial-sphere
-     * illusion. Depth comparison is ALWAYS, so stars overwrite the
-     * clear color but don't fight against each other. */
+    /* Starfield first — fullscreen triangle that reconstructs the
+     * per-fragment ray direction from the camera basis (right/up/
+     * forward) + NDC. The upstream shader's voronoi-based stars and
+     * fbm nebula need the camera basis in world space and the
+     * field-of-view tan/aspect to compute view rays. */
     {
-        HMM_Mat4 view_no_trans       = view;
-        view_no_trans.Columns[3]     = (HMM_Vec4){ .Elements = { 0, 0, 0, 1 } };
-        HMM_Mat4 sky_mvp             = HMM_MulM4(proj, view_no_trans);
-        starfield_star_vs_params_t svsp;
-        memcpy(svsp.mvp, &sky_mvp, sizeof(sky_mvp));
+        HMM_Vec3 eye      = camera_eye(cam);
+        HMM_Vec3 cam_fwd  = HMM_NormV3(HMM_SubV3(cam->focus_target, eye));
+        HMM_Vec3 world_up = { .Elements = { 0.0f, 1.0f, 0.0f } };
+        HMM_Vec3 cam_rgt  = HMM_NormV3(HMM_Cross(cam_fwd, world_up));
+        HMM_Vec3 cam_up   = HMM_Cross(cam_rgt, cam_fwd);
+
+        float fov_y_rad  = cam->fov_y_deg * (HMM_PI / 180.0f);
+        float tan_half   = tanf(fov_y_rad * 0.5f);
+
+        starfield_star_fs_params_t sfsp = {
+            .camRight   = { cam_rgt.X, cam_rgt.Y, cam_rgt.Z, 0.0f },
+            .camUp      = { cam_up.X,  cam_up.Y,  cam_up.Z,  0.0f },
+            .camForward = { cam_fwd.X, cam_fwd.Y, cam_fwd.Z, 0.0f },
+            .params     = { tan_half, aspect, (float)state.sim_time, 0.0f },
+        };
 
         sg_apply_pipeline(state.starfield_pip);
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0] = state.starfield_vbuf });
-        sg_apply_uniforms(UB_starfield_star_vs_params, &(sg_range){ &svsp, sizeof(svsp) });
-        sg_draw(0, STARFIELD_COUNT, 1);
+        sg_apply_uniforms(UB_starfield_star_fs_params, &(sg_range){ &sfsp, sizeof(sfsp) });
+        sg_draw(0, 3, 1);
     }
 
     /* Sun next. */

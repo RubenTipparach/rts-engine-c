@@ -61,16 +61,16 @@ void main() {
     vec3 N    = normalize(vLocal);
     vec3 base = N * scale + vec3(t, t * 0.6, t * -0.4);
 
-    /* Density via fbm. Smooth alpha (not binary) so cloud edges
-     * fade to transparent instead of hard-cutting. */
+    /* Density via fbm. Smooth alpha so cloud edges fade. Threshold
+     * is the *low* edge of the smoothstep — anything above gets
+     * partially-to-fully opaque cloud. */
     float d       = fbm3(base);
-    float density = smoothstep(thresh, thresh + 0.20, d);
-    if (density < 0.01) discard;
+    float density = smoothstep(thresh, thresh + 0.30, d);
 
     /* Normal-map style: sample fbm at small offsets in the tangent
      * frame, compute gradient, perturb the surface normal toward
-     * the higher-density direction. Bump is light (params.w around
-     * 0.5-1.0) so Lambert stays positive. */
+     * the higher-density direction. Bump is light so Lambert
+     * stays positive. */
     vec3  up  = abs(N.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     vec3  tng = normalize(cross(up, N));
     vec3  btn = cross(N, tng);
@@ -79,16 +79,18 @@ void main() {
     float dv  = fbm3(base + btn * eps) - d;
     vec3  N_bump = normalize(N - (tng * du + btn * dv) * bumpAmt);
 
-    /* Lambert against the sun direction. Generous ambient floor so
-     * unlit cloud edges stay readable. */
+    /* Lambert against the sun direction. High ambient floor so the
+     * dark side of clouds stays readable when day fade is gone. */
     vec3  L     = normalize(sunDir.xyz);
     float NdotL = max(dot(N_bump, L), 0.0);
-    float lit   = 0.40 + 0.60 * NdotL;
+    float lit   = 0.65 + 0.35 * NdotL;
 
-    /* Day-side fade controls alpha only (no double attenuation on
-     * the colour). */
-    float day   = smoothstep(-0.20, 0.40, dot(N, L));
-    float alpha = density * color.a * day;
+    /* Alpha is just density × layer max alpha. No day fade — that
+     * was zeroing out alpha across the whole sun-facing hemisphere
+     * when smoothstep happened to land the planet's N near the low
+     * edge. The cloud's own colour darkens via `lit` instead. */
+    float alpha = density * color.a;
+    if (alpha < 0.01) discard;
 
     FragColor = vec4(color.rgb * lit, alpha);
 }

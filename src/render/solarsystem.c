@@ -664,11 +664,12 @@ static void build_bodies(void)
                 HMM_Vec3 hi_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
                 float    lo_alpha = 0.85f;
                 float    hi_alpha = 0.45f;
-                float    lo_thresh = 0.30f;
-                float    hi_thresh = 0.35f;
-                /* Cheap per-planet identification by biome palette
-                 * (avoids adding another YAML field for now). The
-                 * lookup is by name match in the body entry. */
+                /* Threshold sits just below the fbm mean (~0.47) so
+                 * about 75-80% of the cloud sphere has alpha>0. With
+                 * the shader's smoothstep window of 0.30 the edges
+                 * fade out softly. */
+                float    lo_thresh = 0.20f;
+                float    hi_thresh = 0.25f;
                 if (strcmp(b->name, "Glacius") == 0) {
                     lo_color = (HMM_Vec3){ .Elements = { 0.90f, 0.95f, 1.00f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.90f, 1.00f } };
@@ -677,21 +678,23 @@ static void build_bodies(void)
                     lo_color = (HMM_Vec3){ .Elements = { 0.95f, 0.85f, 0.55f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.70f, 0.40f } };
                     lo_alpha = 0.95f; hi_alpha = 0.65f;
-                    lo_thresh = 0.35f; hi_thresh = 0.40f;
+                    lo_thresh = 0.10f; hi_thresh = 0.15f;
                 } else if (strcmp(b->name, "Mars") == 0) {
                     lo_color = (HMM_Vec3){ .Elements = { 0.85f, 0.55f, 0.40f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.75f, 0.50f, 0.40f } };
                     lo_alpha = 0.55f; hi_alpha = 0.30f;
-                    lo_thresh = 0.45f; hi_thresh = 0.50f;
+                    lo_thresh = 0.40f; hi_thresh = 0.45f;
                 }
-                /* Cloud altitudes sit just above the planet's biome
-                 * peaks but well inside the atmosphere shell. */
+                /* Cloud altitudes sit comfortably above the planet's
+                 * biome peaks but inside the atmosphere shell. The
+                 * gap is generous (3-5 steps) so float depth never
+                 * z-fights the tallest cliff cells. */
                 float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
                     ? (full->step_height / full->radius) : 0.04f;
                 int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
                 float biome_top  = 1.0f + (float)c_max * c_step;
-                float cloud_lo_r = biome_top + 1.5f * c_step;
-                float cloud_hi_r = biome_top + 3.5f * c_step;
+                float cloud_lo_r = biome_top + 3.0f * c_step;
+                float cloud_hi_r = biome_top + 5.0f * c_step;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };

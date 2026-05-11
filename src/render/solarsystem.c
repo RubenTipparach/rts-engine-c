@@ -155,6 +155,11 @@ static struct {
     HMM_Vec3     from_focus;
     float        from_distance;
     float        to_distance;
+
+    /* HUD diagnostic — number of cloud draw calls dispatched in the
+     * last frame. Lets the HUD show whether the cloud pass is even
+     * reaching its draw site. */
+    int          cloud_draws_last_frame;
 } state;
 
 static HMM_Vec3 body_world_pos(const body_entry_t *b, double t);
@@ -679,14 +684,11 @@ static void build_bodies(void)
                     lo_alpha = 0.55f; hi_alpha = 0.30f;
                     lo_thresh = 0.45f; hi_thresh = 0.50f;
                 }
-                /* Cloud altitudes sit clearly above the highest biome
-                 * peak so they don't merge into snow caps. */
-                float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
-                    ? (full->step_height / full->radius) : 0.04f;
-                int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
-                float biome_top  = 1.0f + (float)c_max * c_step;
-                float cloud_lo_r = biome_top + 1.5f * c_step;
-                float cloud_hi_r = biome_top + 3.5f * c_step;
+                /* DEBUG: oversized cloud sphere so it CAN'T be confused
+                 * with the atmosphere or hidden by depth. Move back
+                 * to per-step altitudes once we see it. */
+                float cloud_lo_r = 1.30f;
+                float cloud_hi_r = 1.35f;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
@@ -807,7 +809,7 @@ static void build_pipelines(void)
          * buffer like opaque geometry; the shader does its own
          * alpha-test discard so transparent fragments don't pollute
          * the depth buffer. */
-        .cull_mode    = SG_CULLMODE_BACK,
+        .cull_mode    = SG_CULLMODE_NONE,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,
@@ -816,7 +818,7 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = true },
+        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 
@@ -1052,6 +1054,7 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
      * terrain/water and the atmosphere shell so atmosphere haze
      * composites *over* the cloud tops. Two layers per planet, drawn
      * inner→outer so the higher layer alpha-blends over the lower. */
+    state.cloud_draws_last_frame = 0;
     sg_apply_pipeline(state.cloud_pip);
     for (int i = 1; i < state.body_count; i++) {
         const body_entry_t *b = &state.bodies[i];
@@ -1094,6 +1097,7 @@ void solarsystem_frame(double dt, int fb_width, int fb_height, const camera_t *c
             sg_apply_uniforms(UB_clouds_cloud_vs_params, &(sg_range){ &cvsp, sizeof(cvsp) });
             sg_apply_uniforms(UB_clouds_cloud_fs_params, &(sg_range){ &cfsp, sizeof(cfsp) });
             sg_draw(0, state.index_count, 1);
+            state.cloud_draws_last_frame++;
         }
     }
 
@@ -1303,6 +1307,11 @@ const char *solarsystem_active_body_name(void)
 bool solarsystem_is_transitioning(void)
 {
     return state.transitioning;
+}
+
+int solarsystem_cloud_draws_last_frame(void)
+{
+    return state.cloud_draws_last_frame;
 }
 
 void solarsystem_shutdown(void)

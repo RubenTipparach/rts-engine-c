@@ -3,17 +3,20 @@
 #include <math.h>
 #include <string.h>
 
-/* Internal scratch — sized for subdiv 3, the biggest level we ship in
- * uint16-indexed render buffers (see GOLDBERG_MAX_CELLS in the header).
+/* Internal scratch — sized for subdiv 5, GOLDBERG_MAX_CELLS in the
+ * header. Downstream ibufs are uint32 because subdiv 5's biome bake
+ * exceeds 65535 verts per planet.
  *
  *   subdiv 0:  12 verts,  20 tris
  *   subdiv 1:  42 verts,  80 tris
  *   subdiv 2: 162 verts, 320 tris
  *   subdiv 3: 642 verts, 1280 tris
+ *   subdiv 4: 2562 verts, 5120 tris
+ *   subdiv 5: 10242 verts, 20480 tris
  */
-#define ICO_MAX_VERTS  642
-#define ICO_MAX_TRIS  1280
-#define EDGE_HASH_BITS  14
+#define ICO_MAX_VERTS  10242
+#define ICO_MAX_TRIS   20480
+#define EDGE_HASH_BITS  16
 #define EDGE_HASH_SIZE  (1u << EDGE_HASH_BITS)
 #define EDGE_HASH_MASK  (EDGE_HASH_SIZE - 1)
 

@@ -22,4 +22,4 @@ typedef struct {
  * caller sizes the destination arrays. Returns true if everything fit. */
 bool sphere_make_uv(int stacks, int slices,
                     sphere_vertex_t *out_verts, int max_verts, int *out_v_count,
-                    uint16_t *out_indices, int max_indices, int *out_i_count);
+                    uint32_t *out_indices, int max_indices, int *out_i_count);

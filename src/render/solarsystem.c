@@ -42,11 +42,12 @@
 /* Sun + every planet + every moon get their own vbuf. */
 #define MAX_BODIES          (1 + CFG_MAX_PLANETS * (1 + CFG_MAX_MOONS))
 
-/* Goldberg subdiv 3 → 642 cells. Each cell emits up to 6 hex tris
+/* Goldberg subdiv 5 → 10242 cells. Each cell emits up to 6 hex tris
  * for the top fan + up to 6 walls × 4 tris (double-sided) = 30
- * tris per cell × 3 verts = 90 verts per cell. 642 × 90 = 57780,
- * comfortably under the uint16 cap. */
-#define BIOME_VBUF_MAX      65535
+ * tris per cell × 3 verts = 90 verts per cell worst case. 10242 ×
+ * 90 = 921780 → bust uint16; biome ibuf is uint32 below. Cap leaves
+ * headroom for adversarial level patterns without ballooning .bss. */
+#define BIOME_VBUF_MAX      800000
 
 typedef struct {
     HMM_Vec3 pos;        /* 0  */
@@ -158,7 +159,7 @@ static void resolve_world_positions(HMM_Vec3 *out)
 /* ---- mesh + per-body vbuf ---- */
 
 static sphere_vertex_t       s_unit_verts[SPHERE_MAX_VERTS];
-static uint16_t              s_unit_indices[SPHERE_MAX_INDICES];
+static uint32_t              s_unit_indices[SPHERE_MAX_INDICES];
 static int                   s_unit_v_count;
 static int                   s_unit_i_count;
 static sphere_full_vertex_t  s_full_scratch[SPHERE_MAX_VERTS];
@@ -167,7 +168,7 @@ static sphere_full_vertex_t  s_full_scratch[SPHERE_MAX_VERTS];
  * duplicated across cells so adjacent biomes render with crisp
  * colour breaks. */
 static sphere_full_vertex_t  s_biome_scratch[BIOME_VBUF_MAX];
-static uint16_t              s_biome_indices[BIOME_VBUF_MAX];
+static uint32_t              s_biome_indices[BIOME_VBUF_MAX];
 
 /* Goldberg cell list — built once at init from a level-3 icosphere.
  * Shared across every biome planet (same subdiv → same cell layout);
@@ -465,15 +466,17 @@ static void build_geometry(void)
     state.ibuf = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .index_buffer = true },
         .data  = { .ptr = s_unit_indices,
-                   .size = (size_t)s_unit_i_count * sizeof(uint16_t) },
+                   .size = (size_t)s_unit_i_count * sizeof(uint32_t) },
         .label = "sphere-ibuf",
     });
     state.index_count = s_unit_i_count;
 
     /* Goldberg hex sphere — replaces the UV sphere for biome planets.
-     * Built once at level 3 (642 cells); promote to a per-planet
-     * subdivision when we want Earth coarser than Glacius, etc. */
-    if (!goldberg_make(3, s_goldberg_cells, GOLDBERG_MAX_CELLS, &s_goldberg_cell_count)) {
+     * Built once at GOLDBERG_MAX_SUBDIV (currently 5 → 10242 cells);
+     * promote to a per-planet subdivision when we want Earth coarser
+     * than Glacius, etc. */
+    if (!goldberg_make(GOLDBERG_MAX_SUBDIV, s_goldberg_cells,
+                       GOLDBERG_MAX_CELLS, &s_goldberg_cell_count)) {
         LOG_ERROR("solarsystem: goldberg mesh did not fit in static buffers");
         s_goldberg_cell_count = 0;
     }
@@ -482,12 +485,12 @@ static void build_geometry(void)
      * + cliff walls). Each planet's actual draw_count is whatever
      * its biome bake produced, always <= BIOME_VBUF_MAX. */
     for (int i = 0; i < BIOME_VBUF_MAX; i++) {
-        s_biome_indices[i] = (uint16_t)i;
+        s_biome_indices[i] = (uint32_t)i;
     }
     state.ibuf_biome = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .index_buffer = true },
         .data  = { .ptr = s_biome_indices,
-                   .size = (size_t)BIOME_VBUF_MAX * sizeof(uint16_t) },
+                   .size = (size_t)BIOME_VBUF_MAX * sizeof(uint32_t) },
         .label = "sphere-biome-ibuf",
     });
     s_biome_index_count = BIOME_VBUF_MAX;
@@ -643,7 +646,7 @@ static void build_pipelines(void)
                 },
             },
         },
-        .index_type   = SG_INDEXTYPE_UINT16,
+        .index_type   = SG_INDEXTYPE_UINT32,
         .cull_mode    = SG_CULLMODE_BACK,
         .face_winding = SG_FACEWINDING_CCW,
         .depth        = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = true },
@@ -707,7 +710,7 @@ static void build_pipelines(void)
                 },
             },
         },
-        .index_type   = SG_INDEXTYPE_UINT16,
+        .index_type   = SG_INDEXTYPE_UINT32,
         /* Render the inside of the shell sphere from the outside —
          * front-face culling keeps just the back-facing hemisphere
          * (the rim glow). */
@@ -740,7 +743,7 @@ static void build_pipelines(void)
                     .offset = offsetof(sphere_full_vertex_t, brightness), .format = SG_VERTEXFORMAT_FLOAT  },
             },
         },
-        .index_type   = SG_INDEXTYPE_UINT16,
+        .index_type   = SG_INDEXTYPE_UINT32,
         .cull_mode    = SG_CULLMODE_BACK,
         .face_winding = SG_FACEWINDING_CCW,
         .depth        = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = true },

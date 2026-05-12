@@ -17,14 +17,8 @@ void camera_init_solarsystem(camera_t *c, const engine_config_t *eng)
         .fov_y_deg    = 50.0f,
         .near_plane   = 0.5f,
         /* Scene fits inside ~150 world units (outer orbit ≈110 plus
-         * camera pull-back). far=10000 was an order-of-magnitude
-         * over-provisioned and crushed depth precision near typical
-         * viewing distances — the cloud shell's small gap above
-         * terrain (~0.04 world units at planet radius 2.0) was
-         * below the depth buffer's resolvable delta at distance 30+,
-         * so cloud fragments lost LESS_EQUAL against the terrain
-         * they were geometrically above. far=300 keeps the entire
-         * scene in view while restoring depth precision. */
+         * camera pull-back). far=300 keeps the entire scene in view
+         * with healthy depth precision. */
         .far_plane    = 300.0f,
 
         .orbit_sens   = eng->camera.pixels_to_radians,

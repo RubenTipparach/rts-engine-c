@@ -165,7 +165,6 @@ static void on_frame(void)
     sdtx_color3f(0.55f, 0.85f, 0.65f);
     sdtx_printf("touch events: %d   max fingers seen: %d   pinching: %s\n",
                 app.touch_event_count, app.touch_max_fingers, app.pinching ? "YES" : "no");
-    sdtx_printf("cloud draws/frame: %d\n", solarsystem_cloud_draws_last_frame());
 
     sg_begin_pass(&(sg_pass){
         .action    = solarsystem_pass_action(),

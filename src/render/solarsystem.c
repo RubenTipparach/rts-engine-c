@@ -635,7 +635,7 @@ static void build_bodies(void)
              * limb hugs the planet, while keeping the YAML pristine.
              *   visible_outer = 1.0 + (yaml_outer - 1.0) * 0.4 */
             if (biome_path && full->has_atmosphere && full->atmosphere_outer_mul > 1.0f) {
-                const float ATMO_THICKNESS_SCALE = 0.4f;
+                const float ATMO_THICKNESS_SCALE = 0.40f;
                 float visible_outer = 1.0f + (full->atmosphere_outer_mul - 1.0f) * ATMO_THICKNESS_SCALE;
                 b->atmo_vbuf          = build_atmosphere_vbuf(visible_outer, pl->self.name);
                 b->atmo_outer_mul     = visible_outer;
@@ -690,17 +690,18 @@ static void build_bodies(void)
                 /* Cloud altitudes sit above the planet's biome peaks
                  * but *inside* the atmosphere shell — atmosphere
                  * visible_outer is `1 + (yaml_outer - 1) * 0.4`
-                 * (e.g. 1.20 for Earth). Cloud shells land between
-                 * biome_top and that outer, so atmospheric haze
-                 * always renders behind the cloud silhouette. */
+                 * (e.g. 1.20 for Earth). Cloud shells hug the lower
+                 * third of the headroom so the silhouette stays
+                 * tight to the planet and the atmosphere halo
+                 * extends well past them. */
                 float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
                     ? (full->step_height / full->radius) : 0.04f;
                 int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
                 float biome_top  = 1.0f + (float)c_max * c_step;
                 float atmo_top   = b->has_atmosphere ? b->atmo_outer_mul : (biome_top + 6.0f * c_step);
                 float headroom   = atmo_top - biome_top;
-                float cloud_lo_r = biome_top + 0.30f * headroom;
-                float cloud_hi_r = biome_top + 0.65f * headroom;
+                float cloud_lo_r = biome_top + 0.12f * headroom;
+                float cloud_hi_r = biome_top + 0.28f * headroom;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };

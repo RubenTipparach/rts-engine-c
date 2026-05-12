@@ -834,14 +834,13 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        /* Depth test ALWAYS. With the cloud shell sitting tight to
-         * the terrain, LESS_EQUAL kept losing the test over the
-         * planet's center and only the back hemisphere survived as
-         * a limb halo. cull=BACK already drops the back hemisphere,
-         * so ALWAYS draws only the front face of the cloud sphere,
-         * which by construction is in front of the terrain at every
-         * pixel inside the silhouette. */
-        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
+        /* Standard LESS_EQUAL — the cloud shell at 1.12-1.15
+         * (Earth) sits comfortably above terrain at ≤1.10, so the
+         * front hemisphere passes the test against terrain depth
+         * and the back hemisphere is correctly occluded by anything
+         * else (moons, other planets, etc) that's between camera
+         * and the cloud's far side. */
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 

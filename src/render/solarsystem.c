@@ -700,8 +700,15 @@ static void build_bodies(void)
                 float biome_top  = 1.0f + (float)c_max * c_step;
                 float atmo_top   = b->has_atmosphere ? b->atmo_outer_mul : (biome_top + 6.0f * c_step);
                 float headroom   = atmo_top - biome_top;
-                float cloud_lo_r = biome_top + 0.12f * headroom;
-                float cloud_hi_r = biome_top + 0.28f * headroom;
+                /* 0.12 was tight enough that the cloud's front face
+                 * fell inside the depth-buffer precision band of the
+                 * tallest cliff cells and lost the LESS_EQUAL test
+                 * over the planet's center, leaving only the back
+                 * hemisphere visible past the silhouette. 0.22 gives
+                 * a 0.022 unit-sphere gap (~0.044 world units at
+                 * r=2.0) — enough to resolve cleanly. */
+                float cloud_lo_r = biome_top + 0.22f * headroom;
+                float cloud_hi_r = biome_top + 0.45f * headroom;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
@@ -827,12 +834,14 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        /* Cloud shell sits between terrain (≤1.10) and atmosphere
-         * outer (1.20), so LESS_EQUAL correctly passes cloud over
-         * terrain and lets terrain occlude the cloud's far
-         * hemisphere. Depth write off — clouds are translucent and
-         * must not block the orbit-ring pass that comes after. */
-        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        /* Depth test ALWAYS. With the cloud shell sitting tight to
+         * the terrain, LESS_EQUAL kept losing the test over the
+         * planet's center and only the back hemisphere survived as
+         * a limb halo. cull=BACK already drops the back hemisphere,
+         * so ALWAYS draws only the front face of the cloud sphere,
+         * which by construction is in front of the terrain at every
+         * pixel inside the silhouette. */
+        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 

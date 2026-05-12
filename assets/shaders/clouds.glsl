@@ -41,12 +41,18 @@ float noise3(vec3 p) {
         u.z);
 }
 
+/* Take a local copy of p so the caller's variable is not modified.
+ * sokol-shdc / SPIRV-Cross translates a parameter written inside the
+ * function as `inout` in GLES output, which would propagate the
+ * octave doubling back to whatever the caller passed in. Disastrous
+ * when the caller chains multiple fbm samples on the same `base`. */
 float fbm3(vec3 p) {
+    vec3 q = p;
     float v = 0.0;
     float a = 0.5;
     for (int i = 0; i < 4; i++) {
-        v += a * noise3(p);
-        p *= 2.0;
+        v += a * noise3(q);
+        q *= 2.0;
         a *= 0.5;
     }
     return v;

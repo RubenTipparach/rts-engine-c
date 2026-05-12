@@ -810,14 +810,8 @@ static void build_pipelines(void)
             },
         },
         .index_type   = SG_INDEXTYPE_UINT16,
-        /* Both hemispheres of the cloud shell get rasterized. With
-         * back-cull we were somehow getting the *back* hemisphere
-         * only (clouds appeared as a halo at the limb, never over
-         * the terrain). cull=NONE side-steps any winding mismatch
-         * between the cloud vbuf's scaled vertices and the shared
-         * sphere ibuf. Depth test still keeps the cloud's far
-         * hemisphere out of the terrain silhouette. */
-        .cull_mode    = SG_CULLMODE_NONE,
+        /* Back-cull standard for a shell viewed from the outside. */
+        .cull_mode    = SG_CULLMODE_BACK,
         .face_winding = SG_FACEWINDING_CCW,
         .colors[0].blend = {
             .enabled          = true,
@@ -826,7 +820,14 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        /* Depth test disabled — every cloud fragment always draws,
+         * relying on the alpha mask + draw order to look right.
+         * With LESS_EQUAL the front hemisphere wasn't beating the
+         * terrain depth despite sitting geometrically above it.
+         * Cloud draws *after* terrain, so an unconditional cloud
+         * pass composites correctly over the planet's surface and
+         * over the atmosphere behind it. */
+        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 

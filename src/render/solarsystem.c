@@ -838,22 +838,12 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        /* Standard LESS_EQUAL keeps moons / other bodies correctly
-         * in front of the cloud shell when they're closer to camera.
-         * Negative depth bias (`bias < 0`, `bias_slope_scale < 0`)
-         * nudges every cloud fragment slightly *closer* in NDC
-         * depth, which lets the cloud's front face beat the
-         * planet's own terrain depth even when the cloud shell sits
-         * tight to the terrain (1.122 vs 1.10 unit-sphere for
-         * Earth, ~0.044 world units gap). The shift is small enough
-         * that anything noticeably between camera and planet (moons,
-         * other planets) still beats the cloud. */
-        .depth = {
-            .compare           = SG_COMPAREFUNC_LESS_EQUAL,
-            .write_enabled     = false,
-            .bias              = -8.0f,
-            .bias_slope_scale  = -2.0f,
-        },
+        /* LESS_EQUAL — clouds depth-test against other bodies
+         * normally. The cloud_vs shifts gl_Position.z forward by a
+         * fixed NDC amount so the front hemisphere always beats the
+         * planet's own terrain depth without needing to push the
+         * cloud sphere geometrically further out. */
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 

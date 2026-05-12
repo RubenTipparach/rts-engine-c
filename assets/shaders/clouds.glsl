@@ -11,7 +11,15 @@ layout(binding=0) uniform cloud_vs_params {
 layout(location=0) in vec3 aPos;
 out vec3 vLocal;
 void main() {
-    gl_Position = mvp * vec4(aPos, 1.0);
+    vec4 p = mvp * vec4(aPos, 1.0);
+    /* Shift cloud fragments forward in clip-space depth by a fixed
+     * NDC amount. After perspective divide this becomes a constant
+     * NDC-z offset, large enough to beat the planet's terrain depth
+     * even when the cloud shell sits tight to it. Still small
+     * compared to the distance to any other body, so a moon between
+     * camera and cloud-planet still depth-tests correctly. */
+    p.z -= 0.004 * p.w;
+    gl_Position = p;
     vLocal = aPos;
 }
 @end

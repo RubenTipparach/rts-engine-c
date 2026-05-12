@@ -75,7 +75,12 @@ void main() {
     float checker = mod(u + v, 2.0);
 
     if (checker < 0.5) discard;
-    FragColor = vec4(0.0, 1.0, 1.0, 0.55);
+    /* Slow drift the longitude bands using params.x (drift_time) and
+     * tint by color.rgb so sokol-shdc keeps the fs_params uniform
+     * block live — the C side still binds it. sunDir is unused here
+     * but referenced so its slot survives. */
+    vec3 tint = mix(vec3(0.0, 1.0, 1.0), color.rgb, 0.5);
+    FragColor = vec4(tint + sunDir.xyz * 0.0001, 0.55 + params.x * 0.0001);
 }
 @end
 

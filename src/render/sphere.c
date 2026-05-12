@@ -5,7 +5,7 @@
 
 bool sphere_make_uv(int stacks, int slices,
                     sphere_vertex_t *out_verts, int max_verts, int *out_v_count,
-                    uint16_t *out_indices, int max_indices, int *out_i_count)
+                    uint32_t *out_indices, int max_indices, int *out_i_count)
 {
     int v_needed = (stacks + 1) * (slices + 1);
     int i_needed = stacks * slices * 6;
@@ -33,10 +33,10 @@ bool sphere_make_uv(int stacks, int slices,
     int row = slices + 1;
     for (int sy = 0; sy < stacks; sy++) {
         for (int sx = 0; sx < slices; sx++) {
-            uint16_t a = (uint16_t)(sy * row + sx);
-            uint16_t b = (uint16_t)((sy + 1) * row + sx);
-            uint16_t c = (uint16_t)((sy + 1) * row + (sx + 1));
-            uint16_t d = (uint16_t)(sy * row + (sx + 1));
+            uint32_t a = (uint32_t)(sy * row + sx);
+            uint32_t b = (uint32_t)((sy + 1) * row + sx);
+            uint32_t c = (uint32_t)((sy + 1) * row + (sx + 1));
+            uint32_t d = (uint32_t)(sy * row + (sx + 1));
             /* CCW when viewed from outside the sphere (outward-facing
              * normal). Sokol pipelines default to CCW + back-cull so
              * outward triangles must be wound this way to survive. */

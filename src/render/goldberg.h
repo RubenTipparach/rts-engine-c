@@ -12,17 +12,19 @@
  *   N=2 → 162
  *   N=3 → 642
  *   N=4 → 2562
+ *   N=5 → 10242
  *
- * GOLDBERG_MAX_CELLS caps the static buffers; bump it (and the
- * downstream biome-vbuf cap) if you want N=4. */
+ * GOLDBERG_MAX_CELLS caps the static buffers. Bumping past N=5
+ * means the biome bake's per-planet vertex count exceeds 65535, so
+ * the downstream ibufs must stay uint32 (already the case here). */
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "HandmadeMath.h"
 
-#define GOLDBERG_MAX_SUBDIV    3
-#define GOLDBERG_MAX_CELLS     642
+#define GOLDBERG_MAX_SUBDIV    5
+#define GOLDBERG_MAX_CELLS     10242
 #define GOLDBERG_CORNERS_MAX   6
 
 typedef struct {

@@ -16,7 +16,10 @@ void camera_init_solarsystem(camera_t *c, const engine_config_t *eng)
 
         .fov_y_deg    = 50.0f,
         .near_plane   = 0.5f,
-        .far_plane    = 10000.0f,
+        /* Scene fits inside ~150 world units (outer orbit ≈110 plus
+         * camera pull-back). far=300 keeps the entire scene in view
+         * with healthy depth precision. */
+        .far_plane    = 300.0f,
 
         .orbit_sens   = eng->camera.pixels_to_radians,
         .zoom_sens    = 0.001f,

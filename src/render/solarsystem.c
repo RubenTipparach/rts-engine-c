@@ -710,6 +710,10 @@ static void build_bodies(void)
                 float cloud_lo_r = biome_top + 0.22f * headroom;
                 float cloud_hi_r = biome_top + 0.45f * headroom;
 
+                LOG_INFO("clouds[%s]: c_step=%.4f c_max=%d biome_top=%.4f atmo_top=%.4f headroom=%.4f cloud_lo_r=%.4f cloud_hi_r=%.4f display_r=%.4f",
+                         b->name, c_step, c_max, biome_top, atmo_top, headroom,
+                         cloud_lo_r, cloud_hi_r, b->radius);
+
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
                 /* Per-layer params: (drift_speed, noise_scale, density_threshold, bump_strength).
@@ -834,13 +838,22 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        /* Standard LESS_EQUAL — the cloud shell at 1.12-1.15
-         * (Earth) sits comfortably above terrain at ≤1.10, so the
-         * front hemisphere passes the test against terrain depth
-         * and the back hemisphere is correctly occluded by anything
-         * else (moons, other planets, etc) that's between camera
-         * and the cloud's far side. */
-        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
+        /* Standard LESS_EQUAL keeps moons / other bodies correctly
+         * in front of the cloud shell when they're closer to camera.
+         * Negative depth bias (`bias < 0`, `bias_slope_scale < 0`)
+         * nudges every cloud fragment slightly *closer* in NDC
+         * depth, which lets the cloud's front face beat the
+         * planet's own terrain depth even when the cloud shell sits
+         * tight to the terrain (1.122 vs 1.10 unit-sphere for
+         * Earth, ~0.044 world units gap). The shift is small enough
+         * that anything noticeably between camera and planet (moons,
+         * other planets) still beats the cloud. */
+        .depth = {
+            .compare           = SG_COMPAREFUNC_LESS_EQUAL,
+            .write_enabled     = false,
+            .bias              = -8.0f,
+            .bias_slope_scale  = -2.0f,
+        },
         .label = "clouds-pipeline",
     });
 

@@ -826,14 +826,12 @@ static void build_pipelines(void)
             .src_factor_alpha = SG_BLENDFACTOR_ONE,
             .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
         },
-        /* Depth test disabled — every cloud fragment always draws,
-         * relying on the alpha mask + draw order to look right.
-         * With LESS_EQUAL the front hemisphere wasn't beating the
-         * terrain depth despite sitting geometrically above it.
-         * Cloud draws *after* terrain, so an unconditional cloud
-         * pass composites correctly over the planet's surface and
-         * over the atmosphere behind it. */
-        .depth = { .compare = SG_COMPAREFUNC_ALWAYS, .write_enabled = false },
+        /* Cloud shell sits between terrain (≤1.10) and atmosphere
+         * outer (1.20), so LESS_EQUAL correctly passes cloud over
+         * terrain and lets terrain occlude the cloud's far
+         * hemisphere. Depth write off — clouds are translucent and
+         * must not block the orbit-ring pass that comes after. */
+        .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = false },
         .label = "clouds-pipeline",
     });
 

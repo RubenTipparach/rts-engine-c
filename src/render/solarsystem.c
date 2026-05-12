@@ -662,39 +662,45 @@ static void build_bodies(void)
                  * if you see none, that's a real bug. */
                 HMM_Vec3 lo_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
                 HMM_Vec3 hi_color = (HMM_Vec3){ .Elements = { 1.00f, 1.00f, 1.00f } };
-                float    lo_alpha = 0.85f;
-                float    hi_alpha = 0.45f;
-                /* Threshold sits just below the fbm mean (~0.47) so
-                 * about 75-80% of the cloud sphere has alpha>0. With
-                 * the shader's smoothstep window of 0.30 the edges
-                 * fade out softly. */
-                float    lo_thresh = 0.20f;
-                float    hi_thresh = 0.25f;
+                float    lo_alpha = 0.92f;
+                float    hi_alpha = 0.55f;
+                /* Threshold sits a bit above the combined-fbm mean so
+                 * about 35-45% of the sphere has visible cloud cover.
+                 * That gives a planet with weather systems and gaps
+                 * for the terrain to peek through. */
+                float    lo_thresh = 0.30f;
+                float    hi_thresh = 0.34f;
                 if (strcmp(b->name, "Glacius") == 0) {
                     lo_color = (HMM_Vec3){ .Elements = { 0.90f, 0.95f, 1.00f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.90f, 1.00f } };
-                    lo_alpha = 0.70f; hi_alpha = 0.30f;
+                    lo_alpha = 0.78f; hi_alpha = 0.40f;
                 } else if (strcmp(b->name, "Venus") == 0) {
                     lo_color = (HMM_Vec3){ .Elements = { 0.95f, 0.85f, 0.55f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.85f, 0.70f, 0.40f } };
-                    lo_alpha = 0.95f; hi_alpha = 0.65f;
-                    lo_thresh = 0.10f; hi_thresh = 0.15f;
+                    lo_alpha = 0.98f; hi_alpha = 0.72f;
+                    /* Venus is shrouded — drop threshold for full coverage. */
+                    lo_thresh = 0.15f; hi_thresh = 0.20f;
                 } else if (strcmp(b->name, "Mars") == 0) {
                     lo_color = (HMM_Vec3){ .Elements = { 0.85f, 0.55f, 0.40f } };
                     hi_color = (HMM_Vec3){ .Elements = { 0.75f, 0.50f, 0.40f } };
                     lo_alpha = 0.55f; hi_alpha = 0.30f;
-                    lo_thresh = 0.40f; hi_thresh = 0.45f;
+                    /* Mars is mostly clear — only thin dust here and there. */
+                    lo_thresh = 0.45f; hi_thresh = 0.48f;
                 }
-                /* Cloud altitudes sit comfortably above the planet's
-                 * biome peaks but inside the atmosphere shell. The
-                 * gap is generous (3-5 steps) so float depth never
-                 * z-fights the tallest cliff cells. */
+                /* Cloud altitudes sit above the planet's biome peaks
+                 * but *inside* the atmosphere shell — atmosphere
+                 * visible_outer is `1 + (yaml_outer - 1) * 0.4`
+                 * (e.g. 1.20 for Earth). Cloud shells land between
+                 * biome_top and that outer, so atmospheric haze
+                 * always renders behind the cloud silhouette. */
                 float c_step = (full->radius > 0.0f && full->step_height > 0.0f)
                     ? (full->step_height / full->radius) : 0.04f;
                 int   c_max  = (full->level_count > 0) ? (full->level_count - 1) : 5;
                 float biome_top  = 1.0f + (float)c_max * c_step;
-                float cloud_lo_r = biome_top + 3.0f * c_step;
-                float cloud_hi_r = biome_top + 5.0f * c_step;
+                float atmo_top   = b->has_atmosphere ? b->atmo_outer_mul : (biome_top + 6.0f * c_step);
+                float headroom   = atmo_top - biome_top;
+                float cloud_lo_r = biome_top + 0.30f * headroom;
+                float cloud_hi_r = biome_top + 0.65f * headroom;
 
                 b->cloud_vbuf[0]   = build_cloud_vbuf(cloud_lo_r, "clouds-low");
                 b->cloud_color[0]  = (HMM_Vec4){ .Elements = { lo_color.X, lo_color.Y, lo_color.Z, lo_alpha } };
